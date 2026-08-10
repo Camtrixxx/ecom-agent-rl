@@ -44,10 +44,15 @@ template 一致，适配层无需改动。
 
 ### 阶段 B — 数据层
 
-- [ ] 任务池抽样扩到 SFT 3,000/500 + GRPO 3,000/200 + 评测 500
-- [ ] 三者 task_id 零重叠，sha256 + provenance 血缘记录
-- [ ] 按 `attributes` 数量分层记录，用于分层报告
+- [x] 任务池抽样扩到 SFT 3,000/500 + GRPO 3,000/200 + 评测 500
+- [x] 三者 task_id 零重叠，sha256 + provenance 血缘记录
+- [x] 按 `attributes` 数量分层记录，用于分层报告
 - [ ] 教师轨迹采集：断点续跑 + 并发（并发上限受阶段 A 的 SLO 约束）
+
+切分共 7,200 条（占全池 30.7%），分层轴是 `domain_en_short` × `attributes` 桶。
+各池难度分布与全池的偏差在 1 个百分点内，9 个品类全覆盖；grpo_val 只有 200 条，
+抽样噪声最大（5-7 桶 39.0% vs 全池 35.9%），分层报告解读时要留意。
+`python scripts/build_task_pools.py` 复现，血缘见 `data/task_pools/metadata.json`。
 
 参考实现的接受率是 0.41（2,498 条原始轨迹 → 1,026 条通过），按此反推 3,000 条
 accepted 需采集约 7,500 条原始轨迹。
