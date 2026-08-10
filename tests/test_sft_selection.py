@@ -126,21 +126,23 @@ def test_a_trajectory_without_a_buy_step_is_rejected():
 
 
 def test_the_rejection_threshold_can_be_tightened_or_relaxed():
-    dirty = trajectory(rejection_count=3)
-    assert not acceptance_reasons(dirty)[0], "默认阈值 2，3 次应被拒"
-    assert acceptance_reasons(dirty, max_rejections=3)[0]
+    dirty = trajectory(rejection_count=4)
+    assert not acceptance_reasons(dirty)[0], "默认阈值 3，4 次应被拒"
+    assert acceptance_reasons(dirty, max_rejections=4)[0]
     assert not acceptance_reasons(trajectory(rejection_count=1), max_rejections=0)[0]
 
 
-def test_the_default_threshold_accepts_teachers_that_slipped_once_or_twice():
-    """实测依据：阈值 0 时接受率 0%，放到 2 跳到 36.4%（见 DEFAULT_MAX_REJECTIONS）。
+def test_the_default_threshold_sits_at_the_measured_plateau():
+    """实测阈值曲线（150 题）：0→3.3%, 1→19.3%, 2→34.7%, 3→38.0%, 4+→38.0%。
 
-    这条钉住默认值。改小会让教师数据被筛空，改大会收进乱点的轨迹。
+    平台在 3：阈值 3 时「仅因 rejections 被丢」的轨迹为 0 条，再放宽没有余量；
+    阈值 2 会白丢 5 条全是 gold_purchase 的轨迹。这条钉住默认值——改动前该重跑
+    扫描，而不是凭直觉挪。
     """
-    assert DEFAULT_MAX_REJECTIONS == 2
-    for count in (0, 1, 2):
+    assert DEFAULT_MAX_REJECTIONS == 3
+    for count in (0, 1, 2, 3):
         assert acceptance_reasons(trajectory(rejection_count=count))[0], count
-    assert not acceptance_reasons(trajectory(rejection_count=3))[0]
+    assert not acceptance_reasons(trajectory(rejection_count=4))[0]
 
 
 def test_multiple_tool_calls_in_one_turn_are_rejected():
