@@ -48,6 +48,28 @@ if [[ ! -x "${ROOT}/.venv/bin/vllm" ]]; then
   exit 1
 fi
 
+# torch 的 CUDA 构建须不高于 driver 支持的版本。装错了 `torch.cuda.is_available()`
+# 照样返回 True（它不真正建 CUDA context），要等 vLLM 加载完权重、走到
+# `gpu_worker.init_device()` 才炸 "driver is too old"。那时已经烧掉几分钟。
+# PyPI 的 torch==2.11.0 是 cu130 轮子（需 driver ≥ 580），本机 driver 只到 12.8，
+# 因此重建 venv 或装训练依赖后会被覆盖回去——见 docs/environment-notes.md。
+torch_cuda="$("${ROOT}/.venv/bin/python" -c \
+  'import torch; print(torch.version.cuda or "")' 2>/dev/null || true)"
+driver_cuda="$(nvidia-smi 2>/dev/null | grep -oE 'CUDA Version: [0-9.]+' | grep -oE '[0-9.]+' || true)"
+if [[ -n "${torch_cuda}" && -n "${driver_cuda}" ]]; then
+  # 版本号按 major.minor 数值比较，12.10 > 12.8 而字符串比较会反过来。
+  if awk -v t="${torch_cuda}" -v d="${driver_cuda}" 'BEGIN {
+        split(t, a, "."); split(d, b, ".")
+        exit !(a[1] > b[1] || (a[1] == b[1] && a[2] > b[2]))
+      }'; then
+    echo "torch is built for CUDA ${torch_cuda} but the driver only supports ${driver_cuda}." >&2
+    echo "Reinstall the cu128 build (see docs/environment-notes.md):" >&2
+    echo "  uv pip install --python .venv/bin/python \\" >&2
+    echo "    \"torch @ https://download-r2.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp310-cp310-manylinux_2_28_x86_64.whl\"" >&2
+    exit 1
+  fi
+fi
+
 echo "serving ${MODEL##*/} on port ${LLM_PORT}, GPU ${CUDA_VISIBLE_DEVICES}"
 
 # hermes 是 Qwen2.5 的工具调用格式；Qwen3.5 用的 qwen3_coder 在此不适用。

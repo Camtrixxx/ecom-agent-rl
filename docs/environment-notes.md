@@ -197,15 +197,31 @@ instruction 与目标商品的 title/shop_name 中；`_explicit_models` 要求�
 不能用 `release_all` 探活——服务端会 `slot_pool.reset()` 清掉该 worker 上全部租约，
 并行 ablation 撞同一端口段时会静默掐掉别人在飞的回合。
 
-## 这台机器上的端口与显卡
+## 这台机器上的端口、显卡与 CUDA 构建
 
-共用机器，两处默认值不能照抄通用配置：
+共用机器，三处默认值不能照抄通用配置：
 
 - **端口 8000 已被占用**（非本项目进程）。vLLM 默认端口改为 8180，`serve_model.sh`
   启动前先探测，占用则直接退出——否则要等权重加载完才报错。
 - **GPU 0 上有常驻服务**（他人的 embedding-api 约 4.6G + 本人的 aef_inference 约
   3.4G），GPU 1-7 空闲。`serve_model.sh` 默认从 1 号卡起按 `TP_SIZE` 连续取，因此
   可用卡是 7 张；要占满 8 张须显式设 `CUDA_VISIBLE_DEVICES`。
+- **torch 必须装 cu128 构建**。driver 570.172.08 只支持到 CUDA 12.8，而 PyPI 上
+  `torch==2.11.0` 是 cu130 轮子，需要 driver ≥ 580。装错的表现有欺骗性：
+  `torch.cuda.is_available()` 返回 True（它不真正建 CUDA context），`nvidia-smi`
+  一切正常，直到 vLLM 的 `gpu_worker.init_device()` 才炸
+  `NVIDIA driver is too old (found version 12080)`。
+  版本号本身不用改，只换构建变体，vLLM 0.25.1 的依赖约束照样满足：
+
+  ```bash
+  uv pip install --python .venv/bin/python \
+    "torch @ https://download-r2.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp310-cp310-manylinux_2_28_x86_64.whl"
+  ```
+
+  `pyproject.toml` 的 `serve` 组只能写 `torch==2.11.0`（PEP 508 不允许在
+  版本号里钉 local version 又要求可解析），所以**重建 venv 或装训练依赖时会被
+  PyPI 的 cu130 覆盖回去**，之后必须重跑上面这条。检查方法：
+  `python -c "import torch; print(torch.version.cuda)"` 要是 `12.8`。
 
 ## 复现
 

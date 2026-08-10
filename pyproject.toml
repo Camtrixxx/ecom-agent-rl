@@ -28,6 +28,12 @@ dev = [
 ]
 # 推理服务：baseline 评测与 GRPO 采样都靠它。版本对齐参考实现的
 # sft-accelerated 组，这样两边跑出来的数才可比——vLLM 的采样实现跨版本有差异。
+#
+# 装完这组还要把 torch 换成 cu128 构建：PyPI 的 2.11.0 是 cu130 轮子，需要
+# driver ≥ 580，而本机 driver 570 只到 CUDA 12.8。版本号一致、只是构建变体不同，
+# 所以这里的约束照样满足。装错不会立刻报错——`torch.cuda.is_available()` 仍返回
+# True，要等 vLLM 走到 init_device 才炸。`scripts/serve_model.sh` 有前置检查。
+# 命令与排查见 docs/environment-notes.md。
 serve = [
   "vllm==0.25.1",
   "torch==2.11.0",
