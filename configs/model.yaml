@@ -12,7 +12,10 @@ model:
   chat_template_format: hermes
 
 serve:
-  port: 8000
+  # 不用 8000：本机已被其他服务占用。
+  port: 8180
+  # GPU 0 上有别人的常驻服务，从 1 号卡起分配。
+  first_gpu: 1
   # 单卡即可放下 7B 权重；评测时按并发需要调整。
   tensor_parallel_size: 1
   gpu_memory_utilization: 0.85

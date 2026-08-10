@@ -159,6 +159,21 @@ instruction 与目标商品的 title/shop_name 中；`_explicit_models` 要求�
 参考点：按 133 ep/s 算，7,500 条教师轨迹的采集时间约 1 分钟量级的环境开销——
 真正的瓶颈会是教师模型的 API 延迟，不是环境。500 题 × 8 次采样的评测同理。
 
+就绪探测只做 TCP connect，不发任何请求。`pack_api.py` 先跑完
+`initialize_environments()` 才 `app.run()`，所以「端口在监听」已等价于「env 就绪」。
+不能用 `release_all` 探活——服务端会 `slot_pool.reset()` 清掉该 worker 上全部租约，
+并行 ablation 撞同一端口段时会静默掐掉别人在飞的回合。
+
+## 这台机器上的端口与显卡
+
+共用机器，两处默认值不能照抄通用配置：
+
+- **端口 8000 已被占用**（非本项目进程）。vLLM 默认端口改为 8180，`serve_model.sh`
+  启动前先探测，占用则直接退出——否则要等权重加载完才报错。
+- **GPU 0 上有常驻服务**（他人的 embedding-api 约 4.6G + 本人的 aef_inference 约
+  3.4G），GPU 1-7 空闲。`serve_model.sh` 默认从 1 号卡起按 `TP_SIZE` 连续取，因此
+  可用卡是 7 张；要占满 8 张须显式设 `CUDA_VISIBLE_DEVICES`。
+
 ## 复现
 
 ```bash

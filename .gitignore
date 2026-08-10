@@ -6,6 +6,8 @@ __pycache__/
 .mypy_cache/
 
 .DS_Store
+# 本机工具权限，因人而异
+.claude/settings.local.json
 .venv/
 .venv-*/
 venv/

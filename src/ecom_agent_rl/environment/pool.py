@@ -13,9 +13,11 @@ from __future__ import annotations
 import itertools
 import json
 import logging
+import socket
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -120,6 +122,23 @@ class EnvironmentPool:
 
     # ------------------------------------------------------------------ health
 
+    def _probe(self, url: str) -> None:
+        """就绪探测：只连 TCP，不发请求。
+
+        `pack_api.py` 先跑完 `initialize_environments()` 再 `app.run()`，所以
+        「端口在监听」已经等价于「env 已就绪」，connect 成功即充分。
+
+        这里不能用 `release_all` 探活：服务端会 `slot_pool.reset()`，清掉该 worker
+        上**全部**租约。并行跑 ablation 时若两个实验撞上同一端口段，后启动的一方
+        会静默 reset 掉前一方所有在飞回合。探测必须是只读的。
+        """
+        host, _, port = urllib.parse.urlsplit(url).netloc.rpartition(":")
+        try:
+            with socket.create_connection((host, int(port)), timeout=self._timeout):
+                return
+        except (OSError, ValueError) as exc:
+            raise EnvironmentServiceError(f"{url}: {type(exc).__name__}: {exc}") from exc
+
     def wait_until_ready(self, timeout: float = 600.0) -> None:
         """等所有 worker 就绪。初始化 env 期间端口未监听，必须先等。"""
         deadline = time.monotonic() + timeout
@@ -129,7 +148,7 @@ class EnvironmentPool:
             still_pending = []
             for url in pending:
                 try:
-                    self._post(url, {"action": "release_all"})
+                    self._probe(url)
                 except EnvironmentServiceError as exc:
                     last_error = exc
                     still_pending.append(url)

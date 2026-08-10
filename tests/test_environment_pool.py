@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import socket
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -158,6 +159,36 @@ def test_slot_is_returned_even_if_reset_fails():
                 pass
     # 信号量已满则再次 acquire 必须成功
     assert pool._slots[pool.urls[0]].acquire(blocking=False)
+
+
+def test_wait_until_ready_sends_no_requests(pool_and_service):
+    """就绪探测必须只读，且走真实 `_probe`（不能 stub，否则测不到东西）。
+
+    曾用 `release_all` 探活，而服务端会 `slot_pool.reset()` 清掉该 worker 上全部
+    租约——并行 ablation 撞同一端口段时，会静默 reset 掉别的实验在飞的回合。
+    """
+    _, service = pool_and_service
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+
+        pool = EnvironmentPool(base_port=port, workers=1, timeout=5.0)
+        pool._post = service.post  # type: ignore[method-assign]
+        pool.wait_until_ready(timeout=5.0)
+
+    assert service.calls == [], f"probe sent requests: {service.calls}"
+
+
+def test_probe_rejects_a_port_with_nothing_listening():
+    """端口未监听即未就绪；`pack_api.py` 先建好 env 才 app.run()，所以监听即就绪。"""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]  # 绑了但没 listen，connect 会被拒
+
+    pool = EnvironmentPool(base_port=port, workers=1, timeout=1.0)
+    with pytest.raises(EnvironmentServiceError, match="not ready"):
+        pool.wait_until_ready(timeout=1.0)
 
 
 def test_urls_can_be_supplied_directly():
