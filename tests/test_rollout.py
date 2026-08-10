@@ -1,0 +1,302 @@
+"""回合循环的不变量。
+
+用假的模型和假的环境驱动真实的 `run_episode`，钉住三件参考实现踩过的事：
+
+1. 轨迹里不能出现答案字段——它会被写进 jsonl，下游任何人读到就是泄漏。
+2. 被拒的动作要计入总额度，否则「合法一步 + 连拒三次」可以无限循环。
+3. 每轮只执行第一个工具调用，且消息里多余的 tool_call 必须删掉，否则对话不合法。
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import pytest
+
+from ecom_agent_rl.environment.observation import OBSERVATION_VERSION
+from ecom_agent_rl.rollout.agent import Status, run_episode
+from conftest import SEARCH_HOME, detail_state, search_state
+
+
+def tool_call(name: str, arguments: dict[str, Any], call_id: str = "c1") -> dict[str, Any]:
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False)},
+    }
+
+
+class FakeClient:
+    """按脚本依次返回 assistant 消息。脚本用完还被调用就是测试写错了。"""
+
+    def __init__(self, script: list[dict[str, Any]]) -> None:
+        self.script = list(script)
+        self.seen: list[list[dict[str, Any]]] = []
+
+        class _Usage:
+            def snapshot(self) -> dict[str, int]:
+                return {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+
+        self.usage = _Usage()
+
+    def complete(self, messages, tools=None):
+        self.seen.append([dict(m) for m in messages])
+        if not self.script:
+            raise AssertionError("模型被调用的次数超出脚本")
+        return self.script.pop(0)
+
+
+class FakeEpisode:
+    def __init__(self, reset_result: dict[str, Any], steps: list[dict[str, Any]]) -> None:
+        self.reset_result = reset_result
+        self._steps = list(steps)
+        self.actions: list[str] = []
+
+    def interact(self, action: str):
+        self.actions.append(action)
+        raw = self._steps.pop(0)
+
+        class _Step:
+            def __init__(self, raw: dict[str, Any]) -> None:
+                self.raw = raw
+                self.done = bool(raw.get("done"))
+                self.over = bool(raw.get("over"))
+
+            @property
+            def reward(self):
+                value = self.raw.get("reward")
+                return float(value) if isinstance(value, (int, float)) else None
+
+        return _Step(raw)
+
+
+class FakePool:
+    def __init__(self, episode: FakeEpisode) -> None:
+        self._episode = episode
+        self.urls = ["http://fake"]
+
+    def episode(self, task_idx: int):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _ctx():
+            yield self._episode
+
+        return _ctx()
+
+
+def reset_payload(state: dict[str, Any] | None = None) -> dict[str, Any]:
+    """带上真实环境确实会回的答案字段，验证它们不会流进轨迹。"""
+    return {
+        "instruction": "想给狗狗买件衣服，预算 35",
+        "instruction_simple": "推荐香草奶昔色狗狗衣服",
+        "goal_options": ["香草奶昔运动衣 绿", "XS：胸围31cm（建议1-3斤）"],
+        "user_persona": "养狗的年轻人",
+        "reason_key": "k",
+        "env_idx": 1,
+        "idx": 7,
+        "message": "Task 7 started",
+        "environment_version": "shopsimulator-environment-v2.1",
+        "observation_state": state or SEARCH_HOME,
+    }
+
+
+def step_payload(state: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    payload = {
+        "done": False,
+        "over": False,
+        "reward": 0.0,
+        "instruction": "rendered text",
+        "message": "Continue interaction",
+        "env_idx": 1,
+        "idx": "slot-1-7",
+        "reward_detail": {},
+        "purchase": {},
+        "goal": {},
+        "observation_state": state,
+        # 实测每一步都带 progress，里面有逐条约束判定。
+        "progress": {"credited_evidence_added": ["constraint:900000000000:budget:fail"]},
+    }
+    payload.update(extra)
+    return payload
+
+
+def run(script, steps, reset_state=None, **kwargs):
+    client = FakeClient(script)
+    episode = FakeEpisode(reset_payload(reset_state), steps)
+    trajectory = run_episode(
+        pool=FakePool(episode), client=client, task_id=7, **kwargs
+    )
+    return trajectory, client, episode
+
+
+def test_no_answer_field_reaches_the_trajectory_messages():
+    """goal_options / progress / reward_detail 都不许出现在模型看过的内容里。"""
+    trajectory, _, _ = run(
+        [{"tool_calls": [tool_call("search_products", {"query": "狗狗衣服"})]}],
+        [step_payload(search_state(), done=True, reward=1.0,
+                      goal={"asin": "900000000000"},
+                      reward_detail={"brand": 1.0},
+                      purchase={"asin": "900000000000"})],
+    )
+    assert trajectory.status == Status.DONE
+    blob = json.dumps(trajectory.messages, ensure_ascii=False)
+    for secret in ("香草奶昔运动衣", "budget:fail", "reward_detail", "养狗的年轻人"):
+        assert secret not in blob, f"{secret} 泄漏进了 messages"
+
+
+def test_answer_fields_are_kept_in_audit_for_offline_use():
+    """剥离不等于丢掉：过滤教师轨迹要用 reward，所以答案收进 audit。"""
+    trajectory, _, _ = run(
+        [{"tool_calls": [tool_call("search_products", {"query": "狗狗衣服"})]}],
+        [step_payload(search_state(), done=True, reward=1.0, goal={"asin": "900000000000"})],
+    )
+    assert trajectory.reward == 1.0
+    assert trajectory.audit["reset_blocked"]["goal_options"]
+    assert trajectory.audit["terminal"]["goal"] == {"asin": "900000000000"}
+
+
+def test_the_first_user_message_contains_the_initial_observation():
+    """参考实现只给 instruction，模型第一步是在没看到页面的情况下猜的。"""
+    _, client, _ = run(
+        [{"tool_calls": [tool_call("search_products", {"query": "狗狗衣服"})]}],
+        [step_payload(search_state(), done=True, reward=1.0)],
+    )
+    first_user = client.seen[0][1]["content"]
+    assert "预算 35" in first_user
+    assert "【搜索首页】" in first_user
+
+
+def test_rejected_actions_never_reach_the_environment():
+    """守卫拒掉的动作一步都不能发出去——环境对非法 click 是静默 no-op。"""
+    trajectory, _, episode = run(
+        [
+            {"tool_calls": [tool_call("open_product", {"asin": "111111111111"})]},
+            {"tool_calls": [tool_call("search_products", {"query": "狗狗衣服"})]},
+        ],
+        [step_payload(search_state(), done=True, reward=1.0)],
+    )
+    assert episode.actions == ["search[狗狗衣服]"]
+    assert [r["reason"] for r in trajectory.rejections] == ["asin_not_on_page"]
+
+
+def test_three_consecutive_rejections_end_the_episode():
+    calls = [{"tool_calls": [tool_call("buy_now", {})]} for _ in range(3)]
+    trajectory, _, episode = run(calls, [])
+    assert trajectory.status == Status.REJECTION_LIMIT
+    assert episode.actions == []
+    assert len(trajectory.rejections) == 3
+
+
+def test_a_total_rejection_budget_stops_the_legal_step_plus_three_rejections_loop():
+    """参考实现只看「连续」次数，被拒又不算步数，于是这个循环可以无限跑下去。"""
+    script: list[dict[str, Any]] = []
+    steps: list[dict[str, Any]] = []
+    for _ in range(10):
+        script.append({"tool_calls": [tool_call("search_products", {"query": "q"})]})
+        steps.append(step_payload(SEARCH_HOME))  # 仍在首页，可以继续搜
+        script.append({"tool_calls": [tool_call("buy_now", {})]})
+        script.append({"tool_calls": [tool_call("buy_now", {})]})
+    trajectory, _, _ = run(script, steps, max_rejections=4)
+    assert trajectory.status == Status.REJECTION_LIMIT
+    assert len(trajectory.rejections) == 4
+    assert "累计" in (trajectory.error or "")
+
+
+def test_a_successful_step_resets_the_consecutive_counter():
+    trajectory, _, episode = run(
+        [
+            {"tool_calls": [tool_call("buy_now", {})]},
+            {"tool_calls": [tool_call("buy_now", {})]},
+            {"tool_calls": [tool_call("search_products", {"query": "q"})]},
+            {"tool_calls": [tool_call("buy_now", {})]},
+            {"tool_calls": [tool_call("search_products", {"query": "q2"})]},
+        ],
+        [step_payload(SEARCH_HOME), step_payload(SEARCH_HOME, done=True, reward=0.55)],
+    )
+    assert trajectory.status == Status.DONE
+    assert len(trajectory.rejections) == 3  # 但从未连续 3 次
+    assert episode.actions == ["search[q]", "search[q2]"]
+
+
+def test_only_the_first_tool_call_runs_and_the_rest_are_removed_from_the_message():
+    """多余的 tool_call 留在 assistant 消息里，对话就少了对应的 tool 响应，非法。"""
+    trajectory, _, episode = run(
+        [
+            {
+                "tool_calls": [
+                    tool_call("search_products", {"query": "狗狗衣服"}, "a"),
+                    tool_call("buy_now", {}, "b"),
+                ]
+            }
+        ],
+        [step_payload(search_state(), done=True, reward=1.0)],
+    )
+    assert episode.actions == ["search[狗狗衣服]"]
+    assistant = [m for m in trajectory.messages if m["role"] == "assistant"][0]
+    assert len(assistant["tool_calls"]) == 1
+    assert trajectory.steps[0]["dropped_tool_calls"][0]["id"] == "b"
+
+
+def test_every_assistant_tool_call_has_exactly_one_tool_response():
+    """SFT 会直接吃 messages，对话结构不合法就训不了。"""
+    trajectory, _, _ = run(
+        [
+            {"tool_calls": [tool_call("open_product", {"asin": "111111111111"})]},
+            {"tool_calls": [tool_call("search_products", {"query": "q"}, "x")]},
+            {"tool_calls": [tool_call("open_product", {"asin": "900000000000"}, "y")]},
+        ],
+        [step_payload(search_state()), step_payload(detail_state(), done=True, reward=1.0)],
+    )
+    assert trajectory.status == Status.DONE
+    pending: list[str] = []
+    for message in trajectory.messages:
+        if message["role"] == "assistant" and message.get("tool_calls"):
+            assert not pending, "上一轮的 tool_call 还没有响应"
+            pending = [c["id"] for c in message["tool_calls"]]
+        elif message["role"] == "tool":
+            assert pending and message["tool_call_id"] == pending.pop(0)
+    assert not pending
+
+
+def test_malformed_tool_arguments_are_treated_as_a_rejection_not_a_crash():
+    bad = {"id": "c1", "type": "function",
+           "function": {"name": "search_products", "arguments": "{not json"}}
+    trajectory, _, _ = run(
+        [{"tool_calls": [bad]},
+         {"tool_calls": [tool_call("search_products", {"query": "q"})]}],
+        [step_payload(SEARCH_HOME, done=True, reward=0.55)],
+    )
+    assert trajectory.status == Status.DONE
+    assert trajectory.rejections[0]["reason"].startswith("malformed_tool_call:")
+
+
+def test_a_reply_without_tool_calls_ends_the_episode():
+    trajectory, _, _ = run([{"content": "我建议你买这件。"}], [])
+    assert trajectory.status == Status.NO_TOOL_CALL
+    assert trajectory.reward is None
+
+
+def test_the_step_budget_is_enforced():
+    script = [{"tool_calls": [tool_call("search_products", {"query": f"q{i}"})]} for i in range(5)]
+    steps = [step_payload(SEARCH_HOME) for _ in range(5)]
+    trajectory, _, episode = run(script, steps, max_steps=3)
+    assert trajectory.status == Status.MAX_STEPS
+    assert len(episode.actions) == 3
+
+
+def test_an_unknown_environment_field_fails_loudly():
+    """环境升级悄悄加了含答案的字段时，宁可整批失败也不要静默泄漏。"""
+    trajectory, _, _ = run(
+        [{"tool_calls": [tool_call("search_products", {"query": "q"})]}],
+        [step_payload(search_state()) | {"gold_answer_v2": "x"}],
+    )
+    assert trajectory.status == Status.OBSERVATION_ERROR
+    assert trajectory.infra_failure
+
+
+def test_infrastructure_failures_are_distinguished_from_bad_model_behaviour():
+    """两者都算「失败」，但一个要修机器，一个是数据。混在一起就没法判断该做什么。"""
+    trajectory, _, _ = run([{"content": "算了"}], [])
+    assert not trajectory.infra_failure

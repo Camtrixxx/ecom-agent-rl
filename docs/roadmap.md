@@ -59,12 +59,20 @@ accepted 需采集约 7,500 条原始轨迹。
 
 ### 阶段 C — 评测
 
-- [ ] 并行 rollout（参考实现是 `for task in tasks` 串行）
+- [x] 并行 rollout（参考实现是 `for task in tasks` 串行）
 - [ ] 每题 k 次采样 + 置信区间
 - [ ] 按 task_id 配对比较
 - [ ] 按 `attributes` 数量与品类分层报告
-- [ ] 评测隔离：移除 reward、gold、raw observation
+- [x] 评测隔离：移除 reward、gold、raw observation
 - [ ] Baseline 跑通，作为对照下界
+
+隔离做在 rollout 层而不是评测层：`observation.split_env_payload` 用白名单过滤，答案
+字段在**写盘之前**就被剥离到 `audit`，所以任何读轨迹文件的下游都拿不到 gold。参考
+实现把 `goal`/`reward_detail` 原样存进 `terminal_result`，只在喂 Judge 时才过滤。
+
+实测发现两处参考实现没提的泄漏：`goal_options` 在 reset 就给出目标商品规格；
+`progress.credited_evidence_added` **每一步**都带 `constraint:<asin>:budget:fail`
+这类逐条约束判定，等于把评分器交给模型。两者都已拦掉并有测试钉住。
 
 ### 阶段 D — 训练
 

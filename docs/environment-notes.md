@@ -67,6 +67,39 @@ instruction 与目标商品的 title/shop_name 中；`_explicit_models` 要求�
 「三池 task_id 零重叠」的正确性依赖这一点：若一个商品挂多条任务，仅按 task_id
 切分会让同一商品的不同任务落进不同池子，形成商品级泄漏。切分脚本应校验该前提。
 
+## 环境每步都回答案，必须白名单过滤
+
+实测 `reset` 和 `interact` 的返回里含这些不能进 prompt 的字段：
+
+| 字段 | 什么时候给 | 内容 |
+|---|---|---|
+| `goal_options` | **reset 就给** | 目标商品的规格，如 `["香草奶昔运动衣 绿", "XS：胸围31cm（建议1-3斤）"]` |
+| `progress` | **每一步都给** | `credited_evidence_added` 里有 `constraint:<asin>:budget:fail` 这类逐条约束判定 |
+| `goal` / `purchase` / `reward_detail` | 终局 | gold asin 与逐维打分 |
+| `instruction_simple` / `user_persona` / `reason_key` | reset | 任务的另一种表述与人设 |
+
+前两个尤其要注意：`goal_options` 在回合还没开始时就把答案给了，`progress` 则相当于
+每一步都把评分器的中间结果递给模型。参考实现只在喂 Judge 时过滤终局字段，这两处
+没有处理。
+
+过滤放在 `observation.split_env_payload`，用白名单：陌生字段直接报错而不是放过，
+因为环境升级新增字段时我们需要被吵醒。答案统一收进轨迹的 `audit`，供离线过滤使用。
+
+## 非法动作是静默 no-op，所以守卫必须权威
+
+实测 `click[not-a-button]`：返回 reward 0、done False、页面不变、**不报错**
+（`web_agent_text_env.py` 的 `else: status = dict(reward=0, done=False)` 兜底分支）。
+也就是说守卫放过一个非法动作，模型会白吃一步且完全收不到反馈。
+
+因此守卫直接读 `observation_state["actions"]` 判合法——这是环境给的权威列表，实测
+全为小写且与 `click[...]` 的匹配目标逐字对应（`next >`、`< prev`、`back to search`、
+`buy now`、`description` …）。参考实现改成用正则从渲染出的中文文本里抠
+`可点击的按钮: [...]`，渲染措辞一改守卫就静默失效。
+
+`select_option` 我们要求模型同时给出 `axis` 与 `value`。环境的 `click[value]` 只按值
+匹配，跨轴误选它察觉不到；`available_options` 里有轴→值映射，多要一个参数就能在守卫
+层挡住这类错误，也能拒掉同名值出现在两轴的歧义情况。
+
 ## 解读上的影响
 
 - 奖励的软匹配部分实质是「属性覆盖率 + 选项匹配」两维，而 `attributes` 是自由

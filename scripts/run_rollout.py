@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""跑一批 rollout：baseline 评测、教师采集、以及 smoke 都走这个入口。
+
+前置：
+    bash scripts/start_environment.sh          # 环境池
+    bash scripts/serve_model.sh                # 被测模型（或指 --base-url 到教师 API）
+
+用法：
+    # baseline：500 题评测集各跑 1 次
+    python scripts/run_rollout.py --pool data/task_pools/evaluation.jsonl \\
+        --out outputs/rollouts/baseline.jsonl
+
+    # smoke：先拿 3 题验证链路
+    python scripts/run_rollout.py --pool data/task_pools/evaluation.jsonl \\
+        --limit 3 --out outputs/rollouts/smoke.jsonl
+
+被中断后重跑同样的命令会自动续跑（按 task_id + attempt 去重）。
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from ecom_agent_rl.environment.pool import EnvironmentPool  # noqa: E402
+from ecom_agent_rl.rollout.agent import DEFAULT_MAX_STEPS  # noqa: E402
+from ecom_agent_rl.rollout.batch import load_task_ids, run_batch  # noqa: E402
+from ecom_agent_rl.rollout.llm import DEFAULT_BASE_URL, ChatClient  # noqa: E402
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--pool", type=Path, required=True, help="任务池 jsonl")
+    parser.add_argument("--out", type=Path, required=True, help="轨迹输出 jsonl（追加）")
+    parser.add_argument("--limit", type=int, default=None, help="只跑前 N 题（smoke 用）")
+    parser.add_argument("--attempts", type=int, default=1, help="每题采样次数")
+    parser.add_argument("--concurrency", type=int, default=None,
+                        help="默认 = worker 数，这是实测的最优工作点")
+    parser.add_argument("--max-steps", type=int, default=DEFAULT_MAX_STEPS)
+    parser.add_argument("--no-resume", action="store_true", help="忽略已有输出，从头跑")
+
+    parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    parser.add_argument("--model", default="ecom-agent")
+    parser.add_argument("--api-key", default=None)
+    parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--top-p", type=float, default=0.95)
+    parser.add_argument("--max-tokens", type=int, default=1024)
+
+    parser.add_argument("--env-host", default="127.0.0.1")
+    parser.add_argument("--env-base-port", type=int, default=5700)
+    parser.add_argument("--env-workers", type=int, default=8)
+    parser.add_argument("--env-slots", type=int, default=4)
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
+
+    if not args.pool.exists():
+        raise SystemExit(f"任务池不存在: {args.pool}\n先跑 python scripts/build_task_pools.py")
+
+    task_ids = load_task_ids(args.pool)
+    if args.limit is not None:
+        task_ids = task_ids[: args.limit]
+
+    pool = EnvironmentPool(
+        host=args.env_host,
+        base_port=args.env_base_port,
+        workers=args.env_workers,
+        slots_per_worker=args.env_slots,
+    )
+    pool.wait_until_ready(timeout=600.0)
+
+    client = ChatClient(
+        base_url=args.base_url,
+        model=args.model,
+        api_key=args.api_key,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        max_tokens=args.max_tokens,
+    )
+
+    summary = run_batch(
+        pool=pool,
+        client=client,
+        task_ids=task_ids,
+        output=args.out,
+        attempts=args.attempts,
+        concurrency=args.concurrency,
+        resume=not args.no_resume,
+        max_steps=args.max_steps,
+    )
+
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    summary_path = args.out.with_suffix(".summary.json")
+    summary_path.write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    print(f"\n汇总写入 {summary_path}")
+    if summary["aborted"]:
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()
