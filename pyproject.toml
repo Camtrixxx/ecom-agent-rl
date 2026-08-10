@@ -18,6 +18,12 @@ dev = [
   "ruff>=0.9,<1",
   "mypy>=1.14,<2",
 ]
+# 推理服务：baseline 评测与 GRPO 采样都靠它。版本对齐参考实现的
+# sft-accelerated 组，这样两边跑出来的数才可比——vLLM 的采样实现跨版本有差异。
+serve = [
+  "vllm==0.25.1",
+  "torch==2.11.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

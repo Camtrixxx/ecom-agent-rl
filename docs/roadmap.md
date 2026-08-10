@@ -82,6 +82,12 @@ accepted 需采集约 7,500 条原始轨迹。
 配对比较实测比非配对区间紧（0.0530 vs 0.0580），因为消掉了题目难度的方差。
 `python scripts/report_metrics.py --trajectories <轨迹> --pool <池> --baseline <对照>`。
 
+拿真轨迹验指标层时发现一个自己的 bug：`run_batch` 把基础设施失败（env_error 等）也写进
+主轨迹文件，于是续跑按 `(task_id, attempt)` 去重时永远跳过它们——「修好之后重跑即可续跑」
+是空话——而指标层会把 `no_terminal:env_error` 当成模型的失败算进分布。现在这类失败改写
+同名的 `.failures.jsonl`，留证据但不占用 attempt。`batch.py` 当时没有任何测试，这是它能
+溜过去的原因；补了 23 个（`tests/test_batch.py`），其中 8 个会在退回旧行为时失败。
+
 ### 阶段 D — 训练
 
 - [ ] 8 卡分布式底座，SFT 与 GRPO 共用

@@ -10,6 +10,11 @@ HTTP。环境侧实测能到 133 episodes/s（32 worker），串行只能吃掉�
 断点续跑按 `(task_id, attempt)` 去重。结果**边跑边追加**写盘，进程被杀也只丢在飞的
 那几条；基础设施类失败（环境挂了、模型服务 502）会中止整批，因为继续跑只是在稳定地
 生产垃圾。
+
+基础设施失败**不写进主轨迹文件**，改写同名的 `.failures.jsonl`。写进去会有两个后果：
+续跑按 `(task_id, attempt)` 去重，于是这些回合永远不会被重试——"修好之后重跑即可续跑"
+就成了空话；而且下游指标层会把它们当成模型的失败来算（实测会出现
+`no_terminal:env_error` 混进终局类型分布）。环境挂掉不是模型的表现。
 """
 
 from __future__ import annotations
@@ -22,7 +27,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Sequence
 
-from .agent import Status, Trajectory, run_episode
+from .agent import INFRA_FAILURES, Trajectory, run_episode
 from .llm import ChatClient
 from ..environment.pool import EnvironmentPool
 
@@ -122,6 +127,8 @@ def run_batch(
     )
 
     writer = _Writer(output)
+    # 基础设施失败单独存档：留证据但不占用 (task_id, attempt)，续跑才能重试它们。
+    failures = _Writer(output.with_suffix(".failures.jsonl"))
     counts: dict[str, int] = {}
     rewards: list[float] = []
     aborted: str | None = None
@@ -169,7 +176,7 @@ def run_batch(
                     continue
                 if trajectory is None:
                     continue
-                writer.write(trajectory)
+                (failures if trajectory.infra_failure else writer).write(trajectory)
                 with lock:
                     counts[trajectory.status] = counts.get(trajectory.status, 0) + 1
                     if trajectory.reward is not None:
@@ -187,12 +194,17 @@ def run_batch(
                     submit_next()
 
     writer.close()
+    failures.close()
     elapsed = time.monotonic() - started
     completed = sum(counts.values())
+    infra_failed = sum(count for status, count in counts.items() if status in INFRA_FAILURES)
     summary = {
         "planned": len(plan),
         "skipped": len(skip),
         "completed": completed,
+        # 写进主文件的条数。基础设施失败不算——它们进了 .failures.jsonl，下次会重试。
+        "written": completed - infra_failed,
+        "infra_failed": infra_failed,
         "status_counts": dict(sorted(counts.items())),
         "elapsed_seconds": round(elapsed, 1),
         "episodes_per_second": round(completed / elapsed, 2) if elapsed > 0 else None,
