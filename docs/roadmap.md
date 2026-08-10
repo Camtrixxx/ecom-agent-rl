@@ -64,7 +64,7 @@ accepted 需采集约 7,500 条原始轨迹。
 - [x] 按 task_id 配对比较
 - [x] 按 `attributes` 数量与品类分层报告
 - [x] 评测隔离：移除 reward、gold、raw observation
-- [ ] Baseline 跑通，作为对照下界
+- [x] Baseline 跑通，作为对照下界
 
 隔离做在 rollout 层而不是评测层：`observation.split_env_payload` 用白名单过滤，答案
 字段在**写盘之前**就被剥离到 `audit`，所以任何读轨迹文件的下游都拿不到 gold。参考
@@ -109,6 +109,28 @@ accepted 需采集约 7,500 条原始轨迹。
 按真模板校准后偏差 1.55% 且偏高（安全方向：早压一点而不是撞墙）。
 `python scripts/check_token_counter.py --trajectories <轨迹>` 可随时复核，换模型必跑。
 
+Baseline 实测（500 题各 1 次，Qwen2.5-7B-Instruct 原始权重，0 基础设施失败）：
+**成功率 0.0566 [0.0384, 0.0788]**，gold 率 0.0545，错买率 0.0020，平均 reward −0.0807，
+平均步数 4.55，平均被拒 1.58。轨迹在 `outputs/rollouts/baseline.jsonl`。
+
+三点会影响后续解读：
+
+**69% 的回合没走到购买**（`no_tool_call` 38.4% + `rejection_limit` 30.4%），主要瓶颈还不是
+选品决策而是把动作发出去。其中 8.1 个百分点（39 条）模型**已经选出合法动作**，只是
+`<tool_call>` 块里混进垃圾（`ListItemIcon`、嵌套 `<|im_start|>assistant` 这类），
+hermes 对整块 `json.loads` 就失败。这是纯格式失败，SFT 几乎必然吃掉——所以报增益时
+要把它单独拆出来，否则「学会了正确输出格式」会被误读成「决策能力提升」。
+
+**难度分层非单调**：5-7 桶 0.0847 反而高于 3-4 桶 0.0326。CI 大幅重叠，且多数回合没到
+约束满足那一步，所以这不是「难题更简单」，而是难度轴在这个能力水平上还没开始起作用。
+等成功率上来再看这张表才有意义。
+
+**错买率 0.0020 配 10.8% 的 `early_abstain`**：模型不是买错，是不敢买。RL 要推的是
+「敢买且买对」，压低错买率不是目标（它已经接近 0）。
+
+压缩在真实数据上触发 16 次，`peak_original_tokens` 34202 > 窗口 24576——没有压缩层
+这 16 个回合会直接撞 400，阶段 C 那节的分析被实测确认。
+
 ### 阶段 D — 训练
 
 - [ ] 8 卡分布式底座，SFT 与 GRPO 共用
@@ -126,9 +148,11 @@ accepted 需采集约 7,500 条原始轨迹。
 `Hermes2ProToolParser`。12 个工具 schema 全部合法，中文 query、asin、空参数三种
 情况往返都正确。
 
-装训练依赖时注意：PyPI 的 torch==2.11.0 是 cu130 轮子，会把 cu128 覆盖回去
-（本机 driver 只到 CUDA 12.8）。`serve_model.sh` 有前置检查，训练入口还没有，
-加训练脚本时要补上同样的检查。
+CUDA 一侧：本机 driver 570 只支持到 CUDA 12.8，而 vLLM 0.25.1 依赖的
+`torch==2.11.0` 是 cu130 轮子，靠 `cuda-compat` 补 user-mode driver 解决
+（`scripts/cuda_env.sh`）。**训练入口必须 source 同一个文件**，否则会撞
+driver too old。绕过它去装 cu128 的 torch 是死路——vLLM 算子会静默返回全零，
+详见 [environment-notes.md](environment-notes.md) 的「CUDA forward compatibility」。
 
 ## 从参考实现继承什么
 
