@@ -26,6 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from ecom_agent_rl.data.task_pool import EXPECTED_PRODUCTS  # noqa: E402
 from ecom_agent_rl.environment.pool import (  # noqa: E402
     DEFAULT_BASE_PORT,
     EnvironmentPool,
@@ -35,7 +36,9 @@ from ecom_agent_rl.environment.pool import (  # noqa: E402
 # 环境侧 MAX_HISTORY_LENGTH=42，一次 interact 追加 1 条记录，
 # 取远小于上限的步数，避免压测本身触发 over。
 DEFAULT_STEPS = 5
-TASK_POOL_SIZE = 23421
+# 商品数即 task_id 上界。权威定义在 data/task_pool.py（那里还钉了 sha256），
+# 不要在这里另抄一份数字：商品库一换，两处就会静默不一致。
+TASK_POOL_SIZE = EXPECTED_PRODUCTS
 
 
 @dataclass

@@ -95,7 +95,12 @@ class EnvironmentPool:
 
     @property
     def capacity(self) -> int:
-        """可同时在飞的回合数上限。"""
+        """可同时在飞的回合数**硬上限**，不是推荐并发值。
+
+        实测最优工作点是「并发 = worker 数」：单进程被 GIL 锁在 1 核，加 slot 不提升
+        吞吐（见 docs/environment-notes.md）。按 capacity 设并发会超配 slots_per_worker
+        倍，只是让请求在服务端排队。`batch.py` 因此默认取 `len(pool.urls)`。
+        """
         return len(self._urls) * self._slots_per_worker
 
     # ---------------------------------------------------------------- transport
@@ -189,14 +194,25 @@ class EnvironmentPool:
             self._slots[url].release()
 
     def _acquire_slot(self) -> str:
-        """非阻塞地扫一圈找空闲 worker；都满了就阻塞等一个。"""
+        """非阻塞地扫一圈找空闲 worker；都满了就轮询等**任意**一个空出来。
+
+        不能在单个 worker 上死等：`_pick` 是轮转，轮到谁就等谁，而那个 worker 可能
+        正在跑一条 35 步的长回合，同时别的 worker 早已空闲。表现是尾部延迟变长而
+        不报任何错，很难查。默认并发 = worker 数时跑不到这条路径，但教师采集把并发
+        调高就会踩到。
+
+        用短超时轮询而不是 Condition：slot 是 BoundedSemaphore，跨 worker 等「任意
+        一个」需要额外的同步原语，而这条路径本就是过载兜底，10ms 的轮询代价可忽略。
+        """
         for _ in range(len(self._urls)):
             url = self._pick()
             if self._slots[url].acquire(blocking=False):
                 return url
-        url = self._pick()
-        self._slots[url].acquire()
-        return url
+        while True:
+            for _ in range(len(self._urls)):
+                url = self._pick()
+                if self._slots[url].acquire(timeout=0.01):
+                    return url
 
     def _release_env(self, url: str, env_idx: int) -> None:
         try:

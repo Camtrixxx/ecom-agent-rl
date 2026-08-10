@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import socket
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -200,3 +201,35 @@ def test_urls_can_be_supplied_directly():
 def test_empty_url_list_is_rejected():
     with pytest.raises(ValueError, match="at least one worker"):
         EnvironmentPool(urls=[])
+
+
+def test_a_full_pool_takes_whichever_worker_frees_up_first():
+    """过载时不能锁在轮到的那个 worker 上死等。
+
+    `_pick` 是轮转，轮到谁就等谁；而那个 worker 可能正在跑一条 35 步长回合，别的
+    worker 早就空了。这个 bug 不报错，只让尾部延迟变长——所以必须有测试守着。
+    这里把池占满，只放开**最后**一个 worker 的 slot，看它能不能拿到。
+    """
+    service = FakeService(slots_per_worker=1)
+    pool = EnvironmentPool(workers=3, slots_per_worker=1)
+    pool._post = service.post  # type: ignore[method-assign]
+
+    # 占满所有 worker。
+    held = [pool._slots[url] for url in pool.urls]
+    for slot in held:
+        assert slot.acquire(blocking=False)
+
+    freed = pool.urls[-1]
+    result: list[str] = []
+
+    def take() -> None:
+        result.append(pool._acquire_slot())
+
+    thread = threading.Thread(target=take, daemon=True)
+    thread.start()
+    time.sleep(0.05)  # 让它进入等待路径
+    assert not result, "池已满时不该拿到 slot"
+
+    pool._slots[freed].release()
+    thread.join(timeout=2.0)
+    assert result == [freed], "空出来的那个 worker 没被取到（可能死等在别的 worker 上）"
