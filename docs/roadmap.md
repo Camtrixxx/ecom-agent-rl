@@ -60,9 +60,9 @@ accepted 需采集约 7,500 条原始轨迹。
 ### 阶段 C — 评测
 
 - [x] 并行 rollout（参考实现是 `for task in tasks` 串行）
-- [ ] 每题 k 次采样 + 置信区间
-- [ ] 按 task_id 配对比较
-- [ ] 按 `attributes` 数量与品类分层报告
+- [x] 每题 k 次采样 + 置信区间
+- [x] 按 task_id 配对比较
+- [x] 按 `attributes` 数量与品类分层报告
 - [x] 评测隔离：移除 reward、gold、raw observation
 - [ ] Baseline 跑通，作为对照下界
 
@@ -73,6 +73,14 @@ accepted 需采集约 7,500 条原始轨迹。
 实测发现两处参考实现没提的泄漏：`goal_options` 在 reset 就给出目标商品规格；
 `progress.credited_evidence_added` **每一步**都带 `constraint:<asin>:budget:fail`
 这类逐条约束判定，等于把评分器交给模型。两者都已拦掉并有测试钉住。
+
+指标层的三个决定（`evaluation/metrics.py`）：主指标是成功率而非平均 reward——后者会把
+「买错了」（-0.85）和「没买」（-0.15）混成一个数，`wrong_purchase` 率单独报；置信区间
+用 bootstrap 而非正态近似，成功率低到 0.1 时 Wald 下界会越界；每题 k 次采样先按题内
+取平均再对题 bootstrap，否则 k×N 条被当独立样本、区间算窄。终局标签取
+`audit.terminal.reward_detail.reward_type`（环境的权威判定），不从 messages 猜。
+配对比较实测比非配对区间紧（0.0530 vs 0.0580），因为消掉了题目难度的方差。
+`python scripts/report_metrics.py --trajectories <轨迹> --pool <池> --baseline <对照>`。
 
 ### 阶段 D — 训练
 
