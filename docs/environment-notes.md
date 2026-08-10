@@ -206,22 +206,59 @@ instruction 与目标商品的 title/shop_name 中；`_explicit_models` 要求�
 - **GPU 0 上有常驻服务**（他人的 embedding-api 约 4.6G + 本人的 aef_inference 约
   3.4G），GPU 1-7 空闲。`serve_model.sh` 默认从 1 号卡起按 `TP_SIZE` 连续取，因此
   可用卡是 7 张；要占满 8 张须显式设 `CUDA_VISIBLE_DEVICES`。
-- **torch 必须装 cu128 构建**。driver 570.172.08 只支持到 CUDA 12.8，而 PyPI 上
-  `torch==2.11.0` 是 cu130 轮子，需要 driver ≥ 580。装错的表现有欺骗性：
-  `torch.cuda.is_available()` 返回 True（它不真正建 CUDA context），`nvidia-smi`
-  一切正常，直到 vLLM 的 `gpu_worker.init_device()` 才炸
-  `NVIDIA driver is too old (found version 12080)`。
-  版本号本身不用改，只换构建变体，vLLM 0.25.1 的依赖约束照样满足：
+- **CUDA 版本要靠 compat 库补差**，见下一节。内核驱动 570.172.08 只支持到 CUDA
+  12.8，而 vLLM 0.25.1 依赖的 `torch==2.11.0` 是 cu130 轮子。
 
-  ```bash
-  uv pip install --python .venv/bin/python \
-    "torch @ https://download-r2.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp310-cp310-manylinux_2_28_x86_64.whl"
-  ```
+## CUDA forward compatibility
 
-  `pyproject.toml` 的 `serve` 组只能写 `torch==2.11.0`（PEP 508 不允许在
-  版本号里钉 local version 又要求可解析），所以**重建 venv 或装训练依赖时会被
-  PyPI 的 cu130 覆盖回去**，之后必须重跑上面这条。检查方法：
-  `python -c "import torch; print(torch.version.cuda)"` 要是 `12.8`。
+driver 570.172.08 支持到 CUDA 12.8；vLLM 0.25.1 依赖 `torch==2.11.0`，PyPI 上这个
+版本是 cu130 轮子，需要 driver ≥ 580。不处理的话 vLLM 要加载完权重、走到
+`gpu_worker.init_device()` 才炸 `NVIDIA driver is too old (found version 12080)`。
+
+三条路试了两条，只有第三条通：
+
+**① 换 cu128 的 torch —— 死路，且失败是静默的。** 版本号不用改、只换构建变体，
+依赖约束照样满足，看起来是最干净的办法。但 vLLM 0.25.1 的预编译算子链接
+`libcudart.so.13`，cu128 环境里这个库不存在，`import vllm._C_stable_libtorch` 直接
+`ImportError`。把残留的 `nvidia/cu13/lib` 塞进 `LD_LIBRARY_PATH` 后 import 能过、
+不报任何错，但算子**返回全零**：
+
+```
+torch.ops._C.rms_norm  ->  out[0][:4] = [0.0, 0.0, 0.0, 0.0]
+参考实现（torch 原生）    ->  ref[0][:4] = [0.1808, 1.2051, 0.7803, 0.9014]
+```
+
+`torch.cuda.synchronize()` 之后仍是全零，算子 schema 也确认调用方式没错。也就是说
+服务能起、请求能回，但模型输出是垃圾——baseline 的数会全废且极难查。**不要走这条。**
+
+**② 升级内核驱动 —— 需要 root**，且这是共用机器，GPU 0 上有别人的常驻服务。
+
+**③ `cuda-compat`（采用）。** NVIDIA 官方支持的 forward compatibility：数据中心卡
+（A800 属于）可以用新版 user-mode driver 配旧内核模块。纯用户态，不动内核模块，
+对机器上其他人零影响。验证结果：
+
+```
+cuDriverGetVersion: 13000 -> CUDA 13.0     # 系统 nvidia-smi 仍报 12.8
+torch 分配+运算: 12.0 | 设备: NVIDIA A800-SXM4-80GB
+```
+
+包从 NVIDIA 的 el8 仓库取（注意 `developer.download.nvidia.com` 会 301 到 `.cn`）：
+
+```bash
+base=https://developer.download.nvidia.cn/compute/cuda/repos/rhel8/x86_64
+curl -sSLO "$base/cuda-compat-13-0-580.178.04-1.el8.x86_64.rpm"
+```
+
+本机**没有 rpm / cpio / bsdtar / 7z**，解包只能自己来：RPM 是 lead(96B) + signature
+header + header，两个 header 都是 `8e ad e8` magic + nindex + hsize 结构，signature
+后要对齐到 8 字节；payload 是 xz 压的 newc cpio。Python 标准库的 `lzma` 够用，
+cpio 手工解（`070701` magic + 13 个 8 位十六进制字段）。解包脚本见 git 历史。
+
+`scripts/cuda_env.sh` 负责把 compat 目录前置到 `LD_LIBRARY_PATH`，`serve_model.sh`
+已 source 它。**加训练入口时要 source 同一个文件**，否则同样会撞 driver too old。
+
+配套的守卫比较的是 `cuDriverGetVersion`（compat 生效后的实际能力）而不是
+`nvidia-smi` 的内核模块版本——后者恒为 12.8，用它比会把正确配置误判成错误。
 
 ## 复现
 

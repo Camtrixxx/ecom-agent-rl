@@ -48,24 +48,42 @@ if [[ ! -x "${ROOT}/.venv/bin/vllm" ]]; then
   exit 1
 fi
 
-# torch 的 CUDA 构建须不高于 driver 支持的版本。装错了 `torch.cuda.is_available()`
-# 照样返回 True（它不真正建 CUDA context），要等 vLLM 加载完权重、走到
-# `gpu_worker.init_device()` 才炸 "driver is too old"。那时已经烧掉几分钟。
-# PyPI 的 torch==2.11.0 是 cu130 轮子（需 driver ≥ 580），本机 driver 只到 12.8，
-# 因此重建 venv 或装训练依赖后会被覆盖回去——见 docs/environment-notes.md。
-torch_cuda="$("${ROOT}/.venv/bin/python" -c \
-  'import torch; print(torch.version.cuda or "")' 2>/dev/null || true)"
-driver_cuda="$(nvidia-smi 2>/dev/null | grep -oE 'CUDA Version: [0-9.]+' | grep -oE '[0-9.]+' || true)"
+# 本机内核驱动只支持 CUDA 12.8，而 vLLM 0.25.1 依赖的 torch 是 cu130 轮子，
+# 靠 cuda-compat 提供的 user-mode driver 补差。见 scripts/cuda_env.sh。
+. "${ROOT}/scripts/cuda_env.sh"
+
+# torch 的 CUDA 构建须不高于**生效的** driver 版本。注意比较对象是
+# `cuDriverGetVersion`（加载 compat 后的实际能力），不是 `nvidia-smi` 报的内核模块
+# 版本——后者恒为 12.8，用它比会把正确配置误判成错误。
+#
+# 这个检查值得留着：装错了 `torch.cuda.is_available()` 照样返回 True（它不真正建
+# CUDA context），要等 vLLM 加载完权重、走到 `gpu_worker.init_device()` 才炸
+# "driver is too old"，那时已经烧掉几分钟。
+read -r torch_cuda driver_cuda <<<"$(
+  LD_LIBRARY_PATH="${LD_LIBRARY_PATH}" "${ROOT}/.venv/bin/python" - <<'PY' 2>/dev/null || true
+import ctypes
+try:
+    import torch
+    torch_cuda = torch.version.cuda or ""
+except Exception:
+    torch_cuda = ""
+try:
+    v = ctypes.c_int()
+    ctypes.CDLL("libcuda.so.1").cuDriverGetVersion(ctypes.byref(v))
+    driver_cuda = f"{v.value // 1000}.{v.value % 1000 // 10}"
+except Exception:
+    driver_cuda = ""
+print(torch_cuda, driver_cuda)
+PY
+)"
 if [[ -n "${torch_cuda}" && -n "${driver_cuda}" ]]; then
   # 版本号按 major.minor 数值比较，12.10 > 12.8 而字符串比较会反过来。
   if awk -v t="${torch_cuda}" -v d="${driver_cuda}" 'BEGIN {
         split(t, a, "."); split(d, b, ".")
         exit !(a[1] > b[1] || (a[1] == b[1] && a[2] > b[2]))
       }'; then
-    echo "torch is built for CUDA ${torch_cuda} but the driver only supports ${driver_cuda}." >&2
-    echo "Reinstall the cu128 build (see docs/environment-notes.md):" >&2
-    echo "  uv pip install --python .venv/bin/python \\" >&2
-    echo "    \"torch @ https://download-r2.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp310-cp310-manylinux_2_28_x86_64.whl\"" >&2
+    echo "torch is built for CUDA ${torch_cuda} but the effective driver only supports ${driver_cuda}." >&2
+    echo "CUDA compat 库可能没生效或版本不够，见 docs/environment-notes.md。" >&2
     exit 1
   fi
 fi
