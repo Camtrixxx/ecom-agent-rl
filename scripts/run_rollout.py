@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -50,9 +51,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-steps", type=int, default=DEFAULT_MAX_STEPS)
     parser.add_argument("--no-resume", action="store_true", help="忽略已有输出，从头跑")
 
-    parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
-    parser.add_argument("--model", default="ecom-agent")
-    parser.add_argument("--api-key", default=None)
+    # 三项都可用环境变量给，教师采集时把 key 从命令行拿掉：这是共用机器，
+    # 命令行参数在 `ps` 里对所有用户可见，也会留在 shell history 里。
+    parser.add_argument("--base-url", default=os.environ.get("LLM_BASE_URL", DEFAULT_BASE_URL))
+    parser.add_argument("--model", default=os.environ.get("LLM_MODEL", "ecom-agent"))
+    parser.add_argument("--api-key", default=os.environ.get("LLM_API_KEY"),
+                        help="默认读 LLM_API_KEY；优先用环境变量而非命令行")
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--max-tokens", type=int, default=1024)

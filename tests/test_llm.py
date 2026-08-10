@@ -50,7 +50,7 @@ def client(monkeypatch, responses: list[Any], **kwargs) -> tuple[ChatClient, lis
     queue = list(responses)
 
     def fake_post(self, url, json=None, headers=None, timeout=None):
-        calls.append({"url": url, "payload": json})
+        calls.append({"url": url, "payload": json, "headers": headers})
         item = queue.pop(0)
         if isinstance(item, Exception):
             raise item
@@ -176,6 +176,28 @@ def test_tools_are_sent_only_when_provided(monkeypatch):
     assert "tools" not in calls[0]["payload"]
     c.complete([{"role": "user", "content": "x"}], [{"type": "function"}])
     assert calls[1]["payload"]["tools"] == [{"type": "function"}]
+
+
+def test_the_api_key_goes_in_the_header_and_nowhere_else(monkeypatch):
+    """教师采集用真 key，而汇总和轨迹都要写盘、日志会留存。
+
+    key 只该出现在 Authorization 头里。谁要是为了调试把 payload 或 usage dump
+    出来，这个断言会先失败。
+    """
+    secret = "sk-do-not-leak-me"
+    c, calls = client(monkeypatch, [FakeResponse(200, ok_body())], api_key=secret)
+    c.complete([{"role": "user", "content": "x"}], [{"type": "function"}])
+    call = calls[0]
+    assert call["headers"]["Authorization"] == f"Bearer {secret}"
+    assert secret not in json.dumps(call["payload"], ensure_ascii=False)
+    assert secret not in json.dumps(c.usage.snapshot(), ensure_ascii=False)
+
+
+def test_no_authorization_header_without_a_key(monkeypatch):
+    """本地 vLLM 不需要 key，别发一个空 Bearer 让服务端困惑。"""
+    c, calls = client(monkeypatch, [FakeResponse(200, ok_body())])
+    c.complete([{"role": "user", "content": "x"}])
+    assert "Authorization" not in calls[0]["headers"]
 
 
 def test_sampling_parameters_reach_the_payload(monkeypatch):
