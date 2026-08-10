@@ -59,11 +59,21 @@ def _is_context_overflow(body: str) -> bool:
 
 @dataclass
 class Usage:
-    """累计 token 用量，用于估教师采集成本与上下文压力。"""
+    """累计 token 用量与上下文压缩量，用于估教师采集成本与上下文压力。
+
+    压缩计数也放这里而不是 `ChatClient` 的裸属性：rollout 是多线程的，裸 `+= 1`
+    会丢计数，而这里本来就有锁。且压缩是否触发只能从汇总里看到——不报出来就等于
+    没法确认压缩在真实链路里生效。
+    """
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
     calls: int = 0
+    compactions: int = 0
+    dropped_groups: int = 0
+    # 压缩前的峰值输入 token。未压缩时它就是最大的一次请求，压缩后这个数会超过
+    # 窗口——正是它说明「不压缩就会撞 400」。
+    peak_original_tokens: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def add(self, usage: Mapping[str, Any] | None) -> None:
@@ -73,12 +83,24 @@ class Usage:
                 self.prompt_tokens += int(usage.get("prompt_tokens") or 0)
                 self.completion_tokens += int(usage.get("completion_tokens") or 0)
 
+    def add_compaction(self, original_tokens: int, dropped_groups: int) -> None:
+        """记一次压缩。`dropped_groups == 0` 表示本次未真正丢历史。"""
+        with self._lock:
+            if original_tokens > self.peak_original_tokens:
+                self.peak_original_tokens = original_tokens
+            if dropped_groups > 0:
+                self.compactions += 1
+                self.dropped_groups += dropped_groups
+
     def snapshot(self) -> dict[str, int]:
         with self._lock:
             return {
                 "calls": self.calls,
                 "prompt_tokens": self.prompt_tokens,
                 "completion_tokens": self.completion_tokens,
+                "compactions": self.compactions,
+                "dropped_groups": self.dropped_groups,
+                "peak_original_tokens": self.peak_original_tokens,
             }
 
 
@@ -120,7 +142,7 @@ class ChatClient:
         # 安全边际吸收计数器与服务端的残差（实测 1.55%，且偏高）以及模板小改动。
         self.context_margin = context_margin
         self._token_counter = token_counter
-        self.compactions = 0
+        # 压缩计数在 `usage` 里，不在这里另开一个属性：同一个数两个入口日后必然分叉。
         self.usage = Usage()
         self._local = threading.local()
 
@@ -165,8 +187,7 @@ class ChatClient:
             sent, stats = compact_messages(
                 messages, self._counter().counter_for(tools), budget
             )
-            if stats.dropped_groups:
-                self.compactions += 1
+            self.usage.add_compaction(stats.original_tokens, stats.dropped_groups)
 
         payload: dict[str, Any] = {
             "model": self.model,

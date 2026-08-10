@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any
 
 import pytest
@@ -201,7 +202,11 @@ def test_usage_accumulates_across_calls(monkeypatch):
 def test_usage_counts_a_call_even_without_a_usage_block():
     usage = Usage()
     usage.add(None)
-    assert usage.snapshot() == {"calls": 1, "prompt_tokens": 0, "completion_tokens": 0}
+    snapshot = usage.snapshot()
+    # 只断言这三项，不锁死整个字典：snapshot 会随观测项增加而扩展。
+    assert snapshot["calls"] == 1
+    assert snapshot["prompt_tokens"] == 0
+    assert snapshot["completion_tokens"] == 0
 
 
 # --- 上下文压缩接入 --------------------------------------------------------
@@ -244,7 +249,7 @@ def test_without_a_context_window_nothing_is_compacted(monkeypatch):
     messages = long_conversation(20)
     c.complete(messages)
     assert len(calls[0]["payload"]["messages"]) == len(messages)
-    assert c.compactions == 0
+    assert c.usage.snapshot()["compactions"] == 0
 
 
 def test_an_oversized_prompt_is_compacted_before_being_sent(monkeypatch):
@@ -256,7 +261,11 @@ def test_an_oversized_prompt_is_compacted_before_being_sent(monkeypatch):
     c.complete(messages)
     sent = calls[0]["payload"]["messages"]
     assert len(sent) < len(messages)
-    assert c.compactions == 1
+    snapshot = c.usage.snapshot()
+    assert snapshot["compactions"] == 1
+    assert snapshot["dropped_groups"] > 0
+    # 压缩前的峰值必须超预算，否则这个用例根本没触发到压缩路径。
+    assert snapshot["peak_original_tokens"] > c.input_budget
 
 
 def test_compaction_does_not_mutate_the_caller_s_messages(monkeypatch):
@@ -277,7 +286,48 @@ def test_a_prompt_within_budget_is_sent_verbatim(monkeypatch):
     messages = long_conversation(5)
     c.complete(messages)
     assert calls[0]["payload"]["messages"] == messages
-    assert c.compactions == 0
+    snapshot = c.usage.snapshot()
+    assert snapshot["compactions"] == 0
+    # 没丢历史，但峰值仍被记下——用来判断离撞窗口还有多远。
+    assert snapshot["peak_original_tokens"] > 0
+
+
+def test_compaction_counts_add_up_under_concurrent_rollout():
+    """rollout 多线程共用一个 client，压缩计数必须是累加而非覆盖。
+
+    注意这个用例**不能**证明线程安全：CPython 下 `+= 1` 的竞争窗口极窄，无锁实现
+    在这里大概率同样通过（已实测）。它钉住的是累加语义和 snapshot 的自洽——真正
+    的线程安全靠 `Usage` 里的锁，靠 review 保证，不靠这个断言。
+    """
+    usage = Usage()
+    threads = [
+        threading.Thread(target=lambda: [usage.add_compaction(100, 1) for _ in range(200)])
+        for _ in range(8)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    snapshot = usage.snapshot()
+    assert snapshot["compactions"] == 8 * 200
+    assert snapshot["dropped_groups"] == 8 * 200
+
+
+def test_a_no_op_compaction_records_the_peak_but_not_a_compaction():
+    """未丢历史时不该计数，否则「压缩了几次」永远等于请求数、失去意义。"""
+    usage = Usage()
+    usage.add_compaction(1234, 0)
+    snapshot = usage.snapshot()
+    assert snapshot["compactions"] == 0
+    assert snapshot["dropped_groups"] == 0
+    assert snapshot["peak_original_tokens"] == 1234
+
+
+def test_the_peak_keeps_the_largest_not_the_latest():
+    usage = Usage()
+    usage.add_compaction(9000, 1)
+    usage.add_compaction(3000, 1)
+    assert usage.snapshot()["peak_original_tokens"] == 9000
 
 
 def test_the_input_budget_leaves_room_for_generation_and_margin():
