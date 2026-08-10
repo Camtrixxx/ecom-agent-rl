@@ -13,12 +13,14 @@ import threading
 from typing import Any
 
 import pytest
+import requests
 
 from ecom_agent_rl.rollout.llm import (
     DEFAULT_CONTEXT_WINDOW,
     RETRYABLE_STATUS,
     ChatClient,
     ContextOverflowError,
+    EmptyResponseError,
     LLMError,
     Usage,
     _is_context_overflow,
@@ -135,6 +137,90 @@ def test_retries_are_bounded_and_then_raise(monkeypatch):
     with pytest.raises(LLMError, match="重试"):
         c.complete([{"role": "user", "content": "hi"}])
     assert len(calls) == 4, "retries=3 意味着首次 + 3 次重试"
+
+
+def empty_body() -> dict[str, Any]:
+    """HTTP 200 但 message 既无 content 也无 tool_calls。
+
+    deepseek-v4-flash 在长上下文下的实测行为（17-19 步、~20k 字符时出现）。
+    """
+    return {
+        "choices": [{"message": {"role": "assistant", "content": ""}}],
+        "usage": {"prompt_tokens": 900, "completion_tokens": 0},
+    }
+
+
+def test_an_empty_message_is_retried_then_succeeds(monkeypatch):
+    c, calls = client(monkeypatch, [
+        FakeResponse(200, empty_body()),
+        FakeResponse(200, ok_body("recovered")),
+    ])
+    assert c.complete([{"role": "user", "content": "x"}])["content"] == "recovered"
+    assert len(calls) == 2, "空响应必须重试，否则整条回合白废十几步的 prompt 开销"
+
+
+def test_a_message_with_only_content_is_not_retried(monkeypatch):
+    """只说话不调工具是模型的真实决策，重试它等于篡改模型行为。
+
+    baseline 里 192 条 no_tool_call 走的就是这条路径。
+    """
+    c, calls = client(monkeypatch, [FakeResponse(200, ok_body("我先想想"))])
+    assert c.complete([{"role": "user", "content": "x"}])["content"] == "我先想想"
+    assert len(calls) == 1
+
+
+def test_a_message_with_only_tool_calls_is_not_retried(monkeypatch):
+    """空 content + 有 tool_calls 是这个教师模型的常态，不是异常。"""
+    body = {
+        "choices": [{"message": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "c1", "type": "function",
+                            "function": {"name": "search_products",
+                                         "arguments": '{"query": "黑色化妆包"}'}}],
+        }}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }
+    c, calls = client(monkeypatch, [FakeResponse(200, body)])
+    assert c.complete([{"role": "user", "content": "x"}])["tool_calls"][0]["id"] == "c1"
+    assert len(calls) == 1
+
+
+def test_persistent_empty_responses_raise_the_dedicated_error(monkeypatch):
+    """反复空响应要能和普通 LLMError 区分，否则会被当 infra 失败掐掉整批采集。"""
+    c, calls = client(monkeypatch, [FakeResponse(200, empty_body())] * 4)
+    with pytest.raises(EmptyResponseError):
+        c.complete([{"role": "user", "content": "x"}])
+    assert len(calls) == 4
+
+
+def test_empty_response_error_is_a_subclass_of_llm_error(monkeypatch):
+    c, _ = client(monkeypatch, [FakeResponse(200, empty_body())] * 4)
+    with pytest.raises(LLMError):
+        c.complete([{"role": "user", "content": "x"}])
+
+
+def test_an_empty_response_then_a_transport_error_is_a_plain_llm_error(monkeypatch):
+    """最后一次失败不是空响应时，异常类型不该被前一次的空响应带偏。"""
+    c, _ = client(monkeypatch, [
+        FakeResponse(200, empty_body()),
+        requests.RequestException("connection reset"),
+        requests.RequestException("connection reset"),
+        requests.RequestException("connection reset"),
+    ])
+    with pytest.raises(LLMError) as caught:
+        c.complete([{"role": "user", "content": "x"}])
+    assert not isinstance(caught.value, EmptyResponseError)
+
+
+def test_empty_responses_are_still_counted_in_usage(monkeypatch):
+    """空响应照样计费，用量必须记账，否则成本外推会偏低。"""
+    c, _ = client(monkeypatch, [
+        FakeResponse(200, empty_body()),
+        FakeResponse(200, ok_body("recovered")),
+    ])
+    c.complete([{"role": "user", "content": "x"}])
+    assert c.usage.snapshot()["prompt_tokens"] == 910, "900（空响应）+ 10（成功）"
 
 
 def test_a_malformed_json_body_is_retried_not_fatal(monkeypatch):

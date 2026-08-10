@@ -29,7 +29,7 @@ from typing import Any, Mapping
 from ..environment import observation as obs
 from ..environment import tools
 from ..environment.pool import EnvironmentPool, EnvironmentServiceError
-from .llm import ChatClient, ContextOverflowError, LLMError
+from .llm import ChatClient, ContextOverflowError, EmptyResponseError, LLMError
 from .prompt import SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -47,7 +47,8 @@ class Status:
 
     DONE = "done"                       # 环境判定回合结束（买了 / 主动结束 / 触顶）
     MAX_STEPS = "max_steps"             # 用完步数预算
-    NO_TOOL_CALL = "no_tool_call"       # 模型只说话不调工具
+    NO_TOOL_CALL = "no_tool_call"       # 模型只说话不调工具（有正文，没动手）
+    EMPTY_RESPONSE = "empty_response"   # 服务端反复返回空消息（无正文也无工具调用）
     REJECTION_LIMIT = "rejection_limit"  # 被守卫拒绝太多次
     CONTEXT_OVERFLOW = "context_overflow"  # prompt 超出模型上下文窗口
     LLM_ERROR = "llm_error"
@@ -61,6 +62,10 @@ class Status:
 # CONTEXT_OVERFLOW 刻意不在此列：它是这一个回合走太远了（长回合把几十个 observation
 # 累进 messages），和 MAX_STEPS 同类，是这道题的一个结局。放进来会让一条长回合
 # 掐掉整批采集。
+#
+# EMPTY_RESPONSE 同理不在此列：客户端已经重试过，走到这个状态说明教师在这条回合上
+# 反复返回空消息。它不该中止整批，但**也不是模型的决策失败**——采集侧要把它和
+# NO_TOOL_CALL 分开统计，否则会把服务端异常算进教师的能力评估里。
 INFRA_FAILURES = frozenset({Status.LLM_ERROR, Status.ENV_ERROR, Status.OBSERVATION_ERROR})
 
 
@@ -158,6 +163,11 @@ def run_episode(
     except ContextOverflowError as exc:
         # 必须排在 LLMError 之前：它是 LLMError 的子类。
         trajectory.status = Status.CONTEXT_OVERFLOW
+        trajectory.error = f"{type(exc).__name__}: {exc}"
+    except EmptyResponseError as exc:
+        # 同样必须排在 LLMError 之前。重试已在客户端做过，走到这里说明反复空响应，
+        # 是这一个回合的结局而非 infra 故障。
+        trajectory.status = Status.EMPTY_RESPONSE
         trajectory.error = f"{type(exc).__name__}: {exc}"
     except LLMError as exc:
         trajectory.status = Status.LLM_ERROR

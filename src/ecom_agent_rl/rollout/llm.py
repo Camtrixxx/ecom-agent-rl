@@ -41,6 +41,18 @@ class ContextOverflowError(LLMError):
     """
 
 
+class EmptyResponseError(LLMError):
+    """服务端反复返回空消息（HTTP 200，既无 content 也无 tool_calls）。
+
+    和 ContextOverflowError 同理，单独一类而非 infra 失败：deepseek-v4-flash 在长
+    上下文下会偶发这种响应，重试通常能过；但若重试耗尽仍是空的，那是这一个回合
+    走进了教师的坏区间，不是环境或网络坏了。算成 infra 会让一条回合掐掉整批采集。
+
+    注意与 Status.NO_TOOL_CALL 的区别：那是模型给了正文却不动手（真实决策，要如实
+    记录）；这里是什么都没给（服务端异常，该重试）。
+    """
+
+
 # vLLM / OpenAI 在超上下文时都回 400，靠这些片段认出来。措辞变了会退化成普通
 # LLMError（保守方向：中止整批而不是静默把长回合算成失败），测试钉住当前措辞。
 _CONTEXT_OVERFLOW_MARKERS = (
@@ -207,7 +219,13 @@ class ChatClient:
 
         url = f"{self.base_url}/chat/completions"
         last: str = "no attempt made"
+        # 最后一次重试的原因是否为空响应。用显式布尔而不是在 `last` 里匹配字符串：
+        # 措辞是给人看的，改文案不应该改变异常类型。
+        last_was_empty = False
         for attempt in range(self.retries + 1):
+            # 每轮复位：一次空响应之后紧跟一次网络错误，最终异常应当是 LLMError
+            # 而不是 EmptyResponseError。
+            last_was_empty = False
             try:
                 response = self._session().post(
                     url, json=payload, headers=headers, timeout=self.timeout
@@ -225,9 +243,26 @@ class ChatClient:
                     raise LLMError(f"HTTP {response.status_code}: {detail}")
                 body = response.json()
                 message = body["choices"][0]["message"]
+                # HTTP 200 但既没正文也没工具调用 —— 这是服务端的空响应，不是模型的
+                # 决策。deepseek-v4-flash 在上下文变长后会偶发返回这种消息（实测
+                # 17-19 步、~20k 字符时出现）。不重试的话整条回合就废在这里，前面
+                # 十几步的 prompt 开销全白付。
+                #
+                # 判据必须是「两者皆空」：只有 content、没有 tool_calls 是模型真实
+                # 的决策（它选择说话而不动手），那种情况要如实记成 NO_TOOL_CALL，
+                # 重试它等于篡改模型行为。
+                if not (message.get("tool_calls") or message.get("content")):
+                    last = "HTTP 200 但 message 既无 content 也无 tool_calls"
+                    last_was_empty = True
+                    self.usage.add(body.get("usage"))  # 空响应也计费，要记进用量
+                    raise _Retry(last)
             except (requests.RequestException, _Retry, ValueError, KeyError, IndexError) as exc:
                 last = f"{type(exc).__name__}: {exc}"
                 if attempt >= self.retries:
+                    if last_was_empty:
+                        raise EmptyResponseError(
+                            f"{url}: 重试 {self.retries} 次仍是空响应"
+                        ) from exc
                     raise LLMError(f"{url}: 重试 {self.retries} 次仍失败，最后一次 {last}") from exc
                 # 指数退避 + 抖动：并发 worker 同时失败时不要同步重试。
                 time.sleep(min(2.0 ** attempt, 8.0) * (0.5 + random.random()))
