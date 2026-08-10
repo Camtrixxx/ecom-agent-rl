@@ -1,0 +1,300 @@
+"""ChatClient 的重试与错误分类。
+
+之前没有测试，而这里的分类直接决定「一条长回合」和「模型服务挂了」谁该中止整批：
+超上下文必须是 ContextOverflowError（只结束这一个回合），其余 4xx 才是 LLMError。
+
+不起真服务：把 requests.Session.post 换掉，断言重试次数与抛出的异常类型。
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import pytest
+
+from ecom_agent_rl.rollout.llm import (
+    DEFAULT_CONTEXT_WINDOW,
+    RETRYABLE_STATUS,
+    ChatClient,
+    ContextOverflowError,
+    LLMError,
+    Usage,
+    _is_context_overflow,
+)
+
+
+class FakeResponse:
+    def __init__(self, status_code: int, body: Any = None, text: str | None = None) -> None:
+        self.status_code = status_code
+        self._body = body
+        self.text = text if text is not None else json.dumps(body or {})
+
+    def json(self) -> Any:
+        if self._body is None:
+            raise ValueError("响应不是合法 JSON")
+        return self._body
+
+
+def ok_body(content: str = "hi") -> dict[str, Any]:
+    return {
+        "choices": [{"message": {"role": "assistant", "content": content}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 3},
+    }
+
+
+def client(monkeypatch, responses: list[Any], **kwargs) -> tuple[ChatClient, list]:
+    """把 post 换成按序返回 responses；元素是异常则抛出。"""
+    calls: list[dict[str, Any]] = []
+    queue = list(responses)
+
+    def fake_post(self, url, json=None, headers=None, timeout=None):
+        calls.append({"url": url, "payload": json})
+        item = queue.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setattr("requests.Session.post", fake_post)
+    # 退避睡眠在测试里没意义，去掉。
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+    return ChatClient(retries=3, **kwargs), calls
+
+
+# --- 超上下文的识别（最关键的一条） ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "This model's maximum context length is 24576 tokens, however you requested 44458",
+        '{"error": {"code": "context_length_exceeded"}}',
+        "The prompt is longer than the maximum model length of 24576",
+        "Please reduce the length of the messages.",
+        "PLEASE REDUCE THE LENGTH",  # 大小写不该影响判定
+    ],
+)
+def test_context_overflow_messages_are_recognised(body: str):
+    assert _is_context_overflow(body)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "invalid tool schema: additionalProperties",
+        '{"error": "model not found"}',
+        "unauthorized",
+        "",
+    ],
+)
+def test_other_4xx_bodies_are_not_treated_as_context_overflow(body: str):
+    assert not _is_context_overflow(body)
+
+
+def test_a_context_overflow_400_raises_the_dedicated_error(monkeypatch):
+    """必须是 ContextOverflowError：LLMError 会被当成 infra 失败中止整批。"""
+    c, calls = client(monkeypatch, [
+        FakeResponse(400, text="maximum context length is 24576 tokens")
+    ])
+    with pytest.raises(ContextOverflowError):
+        c.complete([{"role": "user", "content": "hi"}])
+    assert len(calls) == 1, "4xx 不该重试"
+
+
+def test_context_overflow_is_a_subclass_of_llm_error(monkeypatch):
+    """调用方按 LLMError 兜底时仍要能接住，只是 agent 里先匹配更具体的那个。"""
+    assert issubclass(ContextOverflowError, LLMError)
+
+
+def test_an_unrecognised_400_is_a_plain_llm_error(monkeypatch):
+    """措辞变了宁可保守：中止整批，而不是静默把长回合算成模型失败。"""
+    c, _ = client(monkeypatch, [FakeResponse(400, text="tool schema invalid")])
+    with pytest.raises(LLMError) as info:
+        c.complete([{"role": "user", "content": "hi"}])
+    assert not isinstance(info.value, ContextOverflowError)
+
+
+# --- 重试 -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("status", sorted(RETRYABLE_STATUS))
+def test_retryable_statuses_are_retried_then_succeed(monkeypatch, status: int):
+    """vLLM 过载时最常见的就是 5xx；参考实现在这里直接打死整条轨迹。"""
+    c, calls = client(monkeypatch, [
+        FakeResponse(status, text="overloaded"),
+        FakeResponse(200, ok_body()),
+    ])
+    message = c.complete([{"role": "user", "content": "hi"}])
+    assert message["content"] == "hi"
+    assert len(calls) == 2
+
+
+def test_retries_are_bounded_and_then_raise(monkeypatch):
+    c, calls = client(monkeypatch, [FakeResponse(503, text="down")] * 4)
+    with pytest.raises(LLMError, match="重试"):
+        c.complete([{"role": "user", "content": "hi"}])
+    assert len(calls) == 4, "retries=3 意味着首次 + 3 次重试"
+
+
+def test_a_malformed_json_body_is_retried_not_fatal(monkeypatch):
+    """参考实现在这里抛 KeyError: 'choices'，一条轨迹就废了。"""
+    c, calls = client(monkeypatch, [
+        FakeResponse(200, None, text="<html>502 bad gateway</html>"),
+        FakeResponse(200, ok_body("recovered")),
+    ])
+    assert c.complete([{"role": "user", "content": "x"}])["content"] == "recovered"
+    assert len(calls) == 2
+
+
+def test_a_body_without_choices_is_retried(monkeypatch):
+    c, calls = client(monkeypatch, [
+        FakeResponse(200, {"usage": {}}),
+        FakeResponse(200, ok_body("recovered")),
+    ])
+    assert c.complete([{"role": "user", "content": "x"}])["content"] == "recovered"
+    assert len(calls) == 2
+
+
+def test_transport_errors_are_retried(monkeypatch):
+    import requests
+
+    c, calls = client(monkeypatch, [
+        requests.ConnectionError("connection refused"),
+        FakeResponse(200, ok_body("recovered")),
+    ])
+    assert c.complete([{"role": "user", "content": "x"}])["content"] == "recovered"
+    assert len(calls) == 2
+
+
+# --- 请求构造与用量 --------------------------------------------------------
+
+
+def test_tools_are_sent_only_when_provided(monkeypatch):
+    c, calls = client(monkeypatch, [FakeResponse(200, ok_body()), FakeResponse(200, ok_body())])
+    c.complete([{"role": "user", "content": "x"}])
+    assert "tools" not in calls[0]["payload"]
+    c.complete([{"role": "user", "content": "x"}], [{"type": "function"}])
+    assert calls[1]["payload"]["tools"] == [{"type": "function"}]
+
+
+def test_sampling_parameters_reach_the_payload(monkeypatch):
+    c, calls = client(monkeypatch, [FakeResponse(200, ok_body())],
+                      temperature=0.3, top_p=0.8, max_tokens=256, model="m")
+    c.complete([{"role": "user", "content": "x"}])
+    payload = calls[0]["payload"]
+    assert payload["temperature"] == 0.3
+    assert payload["top_p"] == 0.8
+    assert payload["max_tokens"] == 256
+    assert payload["model"] == "m"
+
+
+def test_usage_accumulates_across_calls(monkeypatch):
+    c, _ = client(monkeypatch, [FakeResponse(200, ok_body())] * 3)
+    for _ in range(3):
+        c.complete([{"role": "user", "content": "x"}])
+    snapshot = c.usage.snapshot()
+    assert snapshot["calls"] == 3
+    assert snapshot["prompt_tokens"] == 30
+    assert snapshot["completion_tokens"] == 9
+
+
+def test_usage_counts_a_call_even_without_a_usage_block():
+    usage = Usage()
+    usage.add(None)
+    assert usage.snapshot() == {"calls": 1, "prompt_tokens": 0, "completion_tokens": 0}
+
+
+# --- 上下文压缩接入 --------------------------------------------------------
+
+
+class CountingCounter:
+    """按内容字符数计数，测试里可预测。"""
+
+    def counter_for(self, tools):
+        def count(messages):
+            total = 0
+            for m in messages:
+                total += len(str(m.get("content") or ""))
+                for c in m.get("tool_calls") or []:
+                    total += len(str(c["function"]["arguments"]))
+            return total
+
+        return count
+
+
+def long_conversation(steps: int) -> list[dict[str, Any]]:
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": "S"},
+        {"role": "user", "content": "U"},
+    ]
+    for i in range(steps):
+        messages.append({
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": f"c{i}", "type": "function",
+                            "function": {"name": "search_products",
+                                         "arguments": '{"query": "q%d"}' % i}}],
+        })
+        messages.append({"role": "tool", "tool_call_id": f"c{i}", "content": "页" * 200})
+    return messages
+
+
+def test_without_a_context_window_nothing_is_compacted(monkeypatch):
+    """默认行为不变：短回合和单元测试不该被压缩逻辑影响。"""
+    c, calls = client(monkeypatch, [FakeResponse(200, ok_body())])
+    messages = long_conversation(20)
+    c.complete(messages)
+    assert len(calls[0]["payload"]["messages"]) == len(messages)
+    assert c.compactions == 0
+
+
+def test_an_oversized_prompt_is_compacted_before_being_sent(monkeypatch):
+    """不压就是 HTTP 400、回合到此为止。"""
+    c, calls = client(monkeypatch, [FakeResponse(200, ok_body())],
+                      context_window=2000, max_tokens=200, context_margin=50,
+                      token_counter=CountingCounter())
+    messages = long_conversation(30)
+    c.complete(messages)
+    sent = calls[0]["payload"]["messages"]
+    assert len(sent) < len(messages)
+    assert c.compactions == 1
+
+
+def test_compaction_does_not_mutate_the_caller_s_messages(monkeypatch):
+    """trajectory.messages 是要写盘的训练数据，必须保持完整。"""
+    c, _ = client(monkeypatch, [FakeResponse(200, ok_body())],
+                  context_window=2000, max_tokens=200, context_margin=50,
+                  token_counter=CountingCounter())
+    messages = long_conversation(30)
+    before = json.dumps(messages, ensure_ascii=False)
+    c.complete(messages)
+    assert json.dumps(messages, ensure_ascii=False) == before
+
+
+def test_a_prompt_within_budget_is_sent_verbatim(monkeypatch):
+    c, calls = client(monkeypatch, [FakeResponse(200, ok_body())],
+                      context_window=100_000, max_tokens=200,
+                      token_counter=CountingCounter())
+    messages = long_conversation(5)
+    c.complete(messages)
+    assert calls[0]["payload"]["messages"] == messages
+    assert c.compactions == 0
+
+
+def test_the_input_budget_leaves_room_for_generation_and_margin():
+    c = ChatClient(context_window=24576, max_tokens=1024, context_margin=512)
+    assert c.input_budget == 24576 - 1024 - 512
+
+
+def test_no_context_window_means_no_budget():
+    assert ChatClient().input_budget is None
+
+
+def test_the_client_window_matches_the_serve_script():
+    """两边不一致就是白压缩或照样撞 400，而且不会有任何报错提示。"""
+    import re
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parent.parent / "scripts" / "serve_model.sh"
+    match = re.search(r'MAX_MODEL_LEN="\$\{MAX_MODEL_LEN:-(\d+)\}"', script.read_text())
+    assert match, "serve_model.sh 里找不到 MAX_MODEL_LEN 默认值"
+    assert int(match.group(1)) == DEFAULT_CONTEXT_WINDOW

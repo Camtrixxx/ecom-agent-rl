@@ -300,3 +300,82 @@ def test_infrastructure_failures_are_distinguished_from_bad_model_behaviour():
     """两者都算「失败」，但一个要修机器，一个是数据。混在一起就没法判断该做什么。"""
     trajectory, _, _ = run([{"content": "算了"}], [])
     assert not trajectory.infra_failure
+
+
+class _RaisingClient:
+    """第 n 次调用时抛指定异常。"""
+
+    def __init__(self, exc: Exception, after: int = 0) -> None:
+        self.exc = exc
+        self.after = after
+        self.calls = 0
+
+        class _Usage:
+            def snapshot(self) -> dict[str, int]:
+                return {}
+
+        self.usage = _Usage()
+
+    def complete(self, messages, tools=None):
+        self.calls += 1
+        if self.calls > self.after:
+            raise self.exc
+        # 动作要跟着页面走，否则守卫会拒掉（搜过之后就不在搜索首页了），
+        # 步数根本涨不上去，测试就测不到「保留已走过的步」。
+        latest = messages[-1].get("content") or ""
+        if "【搜索首页】" in latest:
+            return {"tool_calls": [tool_call("search_products", {"query": "q"})]}
+        if "【搜索结果】" in latest:
+            return {"tool_calls": [tool_call("back_to_search", {})]}
+        return {"tool_calls": [tool_call("view_description", {})]}
+
+
+def test_context_overflow_ends_the_episode_but_is_not_an_infra_failure():
+    """长回合超窗口是这道题的结局，不是机器坏了。
+
+    算成 infra 失败会让一条长回合掐掉整批采集——实测 35 步外推到 ~44k tokens，
+    对 24576 的窗口来说这不是罕见情况。
+    """
+    from ecom_agent_rl.rollout.llm import ContextOverflowError
+
+    episode = FakeEpisode(reset_payload(), [step_payload(search_state())])
+    trajectory = run_episode(
+        pool=FakePool(episode),
+        client=_RaisingClient(ContextOverflowError("HTTP 400: maximum context length")),
+        task_id=7,
+    )
+    assert trajectory.status == Status.CONTEXT_OVERFLOW
+    assert not trajectory.infra_failure, "超上下文不该中止整批"
+
+
+def test_a_genuine_llm_error_is_still_an_infra_failure():
+    """模型服务真的挂了要停下来修，不能继续稳定地生产垃圾。"""
+    from ecom_agent_rl.rollout.llm import LLMError
+
+    episode = FakeEpisode(reset_payload(), [step_payload(search_state())])
+    trajectory = run_episode(
+        pool=FakePool(episode),
+        client=_RaisingClient(LLMError("重试 3 次仍失败")),
+        task_id=7,
+    )
+    assert trajectory.status == Status.LLM_ERROR
+    assert trajectory.infra_failure
+
+
+def test_context_overflow_keeps_the_steps_taken_so_far():
+    """超窗口发生在第 n 步，前 n-1 步是真数据，不该丢。"""
+    from ecom_agent_rl.rollout.llm import ContextOverflowError
+
+    episode = FakeEpisode(
+        reset_payload(),
+        [step_payload(search_state()), step_payload(SEARCH_HOME)],
+    )
+    trajectory = run_episode(
+        pool=FakePool(episode),
+        client=_RaisingClient(ContextOverflowError("maximum context length"), after=2),
+        task_id=7,
+    )
+    assert trajectory.status == Status.CONTEXT_OVERFLOW
+    # 前 2 次调用各走一步，第 3 次抛；这 2 步是真数据，不该丢。
+    assert trajectory.env_steps == 2
+    assert not trajectory.rejections

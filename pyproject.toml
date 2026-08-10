@@ -10,6 +10,11 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "tqdm>=4.66,<5",
+  # rollout/llm.py 直接用它发 chat completions 请求。
+  "requests>=2.31,<3",
+  # rollout/tokens.py 用它在发请求前数 token，决定何时压缩上下文。
+  # 只要 tokenizers，不要 transformers——后者会拖进 torch，而 rollout 侧不需要。
+  "tokenizers>=0.20,<1",
 ]
 
 [project.optional-dependencies]
@@ -17,6 +22,9 @@ dev = [
   "pytest>=8,<10",
   "ruff>=0.9,<1",
   "mypy>=1.14,<2",
+  # scripts/check_token_counter.py 用它渲染真 chat template 来校准计数器。
+  # 目前只有 vLLM 顺带装了 jinja2，显式声明以免 dev-only 环境跑不了校准。
+  "jinja2>=3.1,<4",
 ]
 # 推理服务：baseline 评测与 GRPO 采样都靠它。版本对齐参考实现的
 # sft-accelerated 组，这样两边跑出来的数才可比——vLLM 的采样实现跨版本有差异。

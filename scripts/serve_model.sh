@@ -7,6 +7,9 @@ MODEL="${1:-/data/heyuhang/models/Qwen2.5-7B-Instruct}"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-ecom-agent}"
 # 8000 是本机常见默认端口，已被别的服务占用；换到不易撞车的段。
 LLM_PORT="${LLM_PORT:-8180}"
+# 客户端按同一个数决定何时压缩历史（rollout/llm.py 的 DEFAULT_CONTEXT_WINDOW）。
+# 改这里就要改那里，否则要么白压缩、要么照样撞 400。
+# 模型本身支持 32768，但 24576 与参考实现一致，便于两边的数直接对比。
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-24576}"
 TP_SIZE="${TP_SIZE:-1}"
 GPU_UTIL="${GPU_UTIL:-0.85}"

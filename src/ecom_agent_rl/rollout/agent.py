@@ -29,7 +29,7 @@ from typing import Any, Mapping
 from ..environment import observation as obs
 from ..environment import tools
 from ..environment.pool import EnvironmentPool, EnvironmentServiceError
-from .llm import ChatClient, LLMError
+from .llm import ChatClient, ContextOverflowError, LLMError
 from .prompt import SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,7 @@ class Status:
     MAX_STEPS = "max_steps"             # 用完步数预算
     NO_TOOL_CALL = "no_tool_call"       # 模型只说话不调工具
     REJECTION_LIMIT = "rejection_limit"  # 被守卫拒绝太多次
+    CONTEXT_OVERFLOW = "context_overflow"  # prompt 超出模型上下文窗口
     LLM_ERROR = "llm_error"
     ENV_ERROR = "env_error"
     OBSERVATION_ERROR = "observation_error"
@@ -56,6 +57,10 @@ class Status:
 
 # 这些状态说明是基础设施坏了，不是模型表现差。批量采集遇到就该停下来修，
 # 而不是把它当成一条"失败轨迹"混进数据里。
+#
+# CONTEXT_OVERFLOW 刻意不在此列：它是这一个回合走太远了（长回合把几十个 observation
+# 累进 messages），和 MAX_STEPS 同类，是这道题的一个结局。放进来会让一条长回合
+# 掐掉整批采集。
 INFRA_FAILURES = frozenset({Status.LLM_ERROR, Status.ENV_ERROR, Status.OBSERVATION_ERROR})
 
 
@@ -149,6 +154,10 @@ def run_episode(
         trajectory.error = f"{type(exc).__name__}: {exc}"
     except obs.ObservationError as exc:
         trajectory.status = Status.OBSERVATION_ERROR
+        trajectory.error = f"{type(exc).__name__}: {exc}"
+    except ContextOverflowError as exc:
+        # 必须排在 LLMError 之前：它是 LLMError 的子类。
+        trajectory.status = Status.CONTEXT_OVERFLOW
         trajectory.error = f"{type(exc).__name__}: {exc}"
     except LLMError as exc:
         trajectory.status = Status.LLM_ERROR

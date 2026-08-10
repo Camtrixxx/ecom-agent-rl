@@ -22,10 +22,39 @@ import requests
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8180/v1"
 RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+# 与 scripts/serve_model.sh 的 MAX_MODEL_LEN 必须一致：客户端按这个数决定何时压缩
+# 历史，服务端按这个数决定何时回 400。两边不一致就是白压或照样撞墙。
+DEFAULT_CONTEXT_WINDOW = 24576
 
 
 class LLMError(RuntimeError):
     """模型调用失败且重试耗尽。"""
+
+
+class ContextOverflowError(LLMError):
+    """prompt 超过模型上下文窗口。
+
+    单独一类，因为它不是「基础设施坏了」而是这一个回合走太远了：长回合把几十个
+    observation 累进 messages，35 步的实测外推是 ~44k tokens 对 24576 的窗口。
+    当成 infra 失败会让一条长回合掐掉整批（batch.py 遇到 infra 失败就中止），
+    而它其实和 max_steps 同类——是这道题的一个结局。
+    """
+
+
+# vLLM / OpenAI 在超上下文时都回 400，靠这些片段认出来。措辞变了会退化成普通
+# LLMError（保守方向：中止整批而不是静默把长回合算成失败），测试钉住当前措辞。
+_CONTEXT_OVERFLOW_MARKERS = (
+    "maximum context length",
+    "context_length_exceeded",
+    "longer than the maximum model length",
+    "reduce the length of the messages",
+    "please reduce the length",
+)
+
+
+def _is_context_overflow(body: str) -> bool:
+    lowered = body.lower()
+    return any(marker in lowered for marker in _CONTEXT_OVERFLOW_MARKERS)
 
 
 @dataclass
@@ -72,6 +101,9 @@ class ChatClient:
         timeout: float = 300.0,
         retries: int = 4,
         extra_body: Mapping[str, Any] | None = None,
+        context_window: int | None = None,
+        context_margin: int = 512,
+        token_counter: Any | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -82,8 +114,29 @@ class ChatClient:
         self.timeout = timeout
         self.retries = retries
         self.extra_body = dict(extra_body or {})
+        # context_window 为 None 表示不压缩（单元测试与短回合场景）。设了就必须能数
+        # token，否则压缩判断无从下手。
+        self.context_window = context_window
+        # 安全边际吸收计数器与服务端的残差（实测 1.55%，且偏高）以及模板小改动。
+        self.context_margin = context_margin
+        self._token_counter = token_counter
+        self.compactions = 0
         self.usage = Usage()
         self._local = threading.local()
+
+    @property
+    def input_budget(self) -> int | None:
+        """留给 prompt 的 token 上限：窗口减去要生成的部分再减边际。"""
+        if self.context_window is None:
+            return None
+        return self.context_window - self.max_tokens - self.context_margin
+
+    def _counter(self):
+        if self._token_counter is None:
+            from .tokens import TokenCounter
+
+            self._token_counter = TokenCounter()
+        return self._token_counter
 
     def _session(self) -> requests.Session:
         session = getattr(self._local, "session", None)
@@ -99,10 +152,25 @@ class ChatClient:
         messages: Sequence[Mapping[str, Any]],
         tools: Sequence[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """返回 assistant message（含 `tool_calls`），失败重试后仍不行则 raise。"""
+        """返回 assistant message（含 `tool_calls`），失败重试后仍不行则 raise。
+
+        配了 `context_window` 时，超预算的历史会先被压缩（见 `context.py`）：
+        长回合的 prompt 会超 24576，不压缩就是 HTTP 400、回合到此为止。
+        """
+        sent: Sequence[Mapping[str, Any]] = messages
+        budget = self.input_budget
+        if budget is not None:
+            from .context import compact_messages
+
+            sent, stats = compact_messages(
+                messages, self._counter().counter_for(tools), budget
+            )
+            if stats.dropped_groups:
+                self.compactions += 1
+
         payload: dict[str, Any] = {
             "model": self.model,
-            "messages": list(messages),
+            "messages": list(sent),
             "temperature": self.temperature,
             "top_p": self.top_p,
             "max_tokens": self.max_tokens,
@@ -127,8 +195,13 @@ class ChatClient:
                     last = f"HTTP {response.status_code}: {response.text[:200]}"
                     raise _Retry(last)
                 if response.status_code >= 400:
-                    # 4xx 多是请求本身有问题（超上下文、schema 不合法），重试没意义。
-                    raise LLMError(f"HTTP {response.status_code}: {response.text[:500]}")
+                    # 4xx 是请求本身有问题（超上下文、schema 不合法），重试没意义。
+                    detail = response.text[:500]
+                    if _is_context_overflow(detail):
+                        raise ContextOverflowError(
+                            f"HTTP {response.status_code}: {detail}"
+                        )
+                    raise LLMError(f"HTTP {response.status_code}: {detail}")
                 body = response.json()
                 message = body["choices"][0]["message"]
             except (requests.RequestException, _Retry, ValueError, KeyError, IndexError) as exc:

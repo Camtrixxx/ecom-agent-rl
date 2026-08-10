@@ -31,7 +31,11 @@ sys.path.insert(0, str(ROOT / "src"))
 from ecom_agent_rl.environment.pool import EnvironmentPool  # noqa: E402
 from ecom_agent_rl.rollout.agent import DEFAULT_MAX_STEPS  # noqa: E402
 from ecom_agent_rl.rollout.batch import load_task_ids, run_batch  # noqa: E402
-from ecom_agent_rl.rollout.llm import DEFAULT_BASE_URL, ChatClient  # noqa: E402
+from ecom_agent_rl.rollout.llm import (  # noqa: E402
+    DEFAULT_BASE_URL,
+    DEFAULT_CONTEXT_WINDOW,
+    ChatClient,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,6 +56,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--max-tokens", type=int, default=1024)
+    # 必须和服务端 --max-model-len 一致。不给就不压缩，长回合会在 ~第 18 步撞
+    # HTTP 400（实测 35 步需要 ~39k tokens，窗口只有 24576）。
+    parser.add_argument("--context-window", type=int, default=DEFAULT_CONTEXT_WINDOW,
+                        help="模型上下文窗口，须与服务端 --max-model-len 一致；0 表示不压缩")
+    parser.add_argument("--context-margin", type=int, default=512,
+                        help="计数器与服务端的残差留白（实测偏差 1.55%%）")
 
     parser.add_argument("--env-host", default="127.0.0.1")
     parser.add_argument("--env-base-port", type=int, default=5700)
@@ -88,6 +98,8 @@ def main() -> None:
         temperature=args.temperature,
         top_p=args.top_p,
         max_tokens=args.max_tokens,
+        context_window=args.context_window or None,
+        context_margin=args.context_margin,
     )
 
     summary = run_batch(
