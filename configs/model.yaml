@@ -1,0 +1,18 @@
+# 基座模型与推理服务配置。
+#
+# Qwen2.5-7B-Instruct 是纯文本模型，工具调用走 hermes 格式。
+# 参考实现使用 Qwen3.5 系列 + qwen3_coder 格式，两者不通用。
+
+model:
+  path: /data/heyuhang/models/Qwen2.5-7B-Instruct
+  served_name: ecom-agent
+  # Qwen2.5 原生支持 32768，购物轨迹实测 24k 可覆盖绝大多数。
+  max_model_len: 24576
+  tool_call_parser: hermes
+  chat_template_format: hermes
+
+serve:
+  port: 8000
+  # 单卡即可放下 7B 权重；评测时按并发需要调整。
+  tensor_parallel_size: 1
+  gpu_memory_utilization: 0.85

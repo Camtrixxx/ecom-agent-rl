@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+.DS_Store
+.venv/
+.venv-*/
+venv/
+*.egg-info/
+build/
+dist/
+.env
+*.log
+
+# 第三方环境由 scripts/setup_environment.sh 拉取，不提交
+/third_party/
+
+# 生成物。锚定到仓库根，否则会连带忽略 src/ecom_agent_rl/data/ 这类源码目录。
+/outputs/
+/checkpoints/
+/models/
+/data/
+/swanlog/
+/wandb/
+/logs/
