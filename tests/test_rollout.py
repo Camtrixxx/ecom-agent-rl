@@ -379,3 +379,28 @@ def test_context_overflow_keeps_the_steps_taken_so_far():
     # 前 2 次调用各走一步，第 3 次抛；这 2 步是真数据，不该丢。
     assert trajectory.env_steps == 2
     assert not trajectory.rejections
+
+
+def test_the_teacher_s_reasoning_is_kept_on_the_assistant_message():
+    """thinking 模式的教师要求把 reasoning_content 回传，缺了就是 HTTP 400。
+
+    实测：一条探针轨迹因此死掉，且回放稳定复现。所以这里保留原样，由
+    `llm.echo_reasoning` 负责回传，`data/sft.py` 的字段白名单负责在建训练集时剥掉。
+    """
+    trajectory, _, _ = run(
+        [{"content": "", "reasoning_content": "先搜一下看看有什么",
+          "tool_calls": [tool_call("search_products", {"query": "狗狗衣服"})]}],
+        [step_payload(search_state(), done=True, reward=1.0)],
+    )
+    assistant = [m for m in trajectory.messages if m["role"] == "assistant"]
+    assert assistant[0]["reasoning_content"] == "先搜一下看看有什么"
+
+
+def test_an_absent_reasoning_content_is_not_invented():
+    """非 thinking 模型不该被塞一个空字段进轨迹——那会写进训练数据。"""
+    trajectory, _, _ = run(
+        [{"content": "搜一下", "tool_calls": [tool_call("search_products", {"query": "x"})]}],
+        [step_payload(search_state(), done=True, reward=1.0)],
+    )
+    assistant = [m for m in trajectory.messages if m["role"] == "assistant"]
+    assert "reasoning_content" not in assistant[0]

@@ -24,6 +24,7 @@ from ecom_agent_rl.rollout.llm import (
     LLMError,
     Usage,
     _is_context_overflow,
+    echo_reasoning,
 )
 
 
@@ -393,7 +394,10 @@ def test_a_prompt_within_budget_is_sent_verbatim(monkeypatch):
                       token_counter=CountingCounter())
     messages = long_conversation(5)
     c.complete(messages)
-    assert calls[0]["payload"]["messages"] == messages
+    sent = calls[0]["payload"]["messages"]
+    # 逐条比对但忽略 reasoning_content：thinking 模式要求最后一条 assistant 带上它
+    # （见 echo_reasoning），那是协议开销，不是「历史被改动」。这条钉的是没丢历史。
+    assert [{k: v for k, v in m.items() if k != "reasoning_content"} for m in sent] == messages
     snapshot = c.usage.snapshot()
     assert snapshot["compactions"] == 0
     # 没丢历史，但峰值仍被记下——用来判断离撞窗口还有多远。
@@ -445,6 +449,76 @@ def test_the_input_budget_leaves_room_for_generation_and_margin():
 
 def test_no_context_window_means_no_budget():
     assert ChatClient().input_budget is None
+
+
+# --- thinking 模式的 reasoning_content 回传 --------------------------------
+
+
+def test_only_the_last_assistant_message_gets_reasoning_content():
+    """实测的服务端规则：补历史轮次仍然 400，只补最后一条才 200。
+
+    所以不要「给所有 assistant 都补一份」——那会往 payload 里塞无谓的空字段。
+    """
+    messages = [
+        {"role": "system", "content": "S"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "a"}]},
+        {"role": "tool", "tool_call_id": "a", "content": "o1"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "b"}]},
+        {"role": "tool", "tool_call_id": "b", "content": "o2"},
+    ]
+    out = echo_reasoning(messages)
+    assistants = [m for m in out if m["role"] == "assistant"]
+    assert "reasoning_content" not in assistants[0]
+    assert assistants[1]["reasoning_content"] == ""
+
+
+def test_a_real_reasoning_content_is_never_overwritten():
+    """回传教师真实的推理，而不是占位串。
+
+    占位串同样能过服务端校验，但会让教师在自己伪造的推理上接着想——这批轨迹是要当
+    教师示范用的，不能悄悄改变它的行为。
+    """
+    messages = [
+        {"role": "assistant", "content": "", "reasoning_content": "真实推理",
+         "tool_calls": [{"id": "a"}]},
+    ]
+    assert echo_reasoning(messages)[0]["reasoning_content"] == "真实推理"
+
+
+def test_echo_reasoning_does_not_mutate_the_caller_s_messages():
+    """trajectory.messages 要写盘当训练数据，不能被请求构造过程污染。"""
+    messages = [{"role": "assistant", "content": "x", "tool_calls": [{"id": "a"}]}]
+    echo_reasoning(messages)
+    assert "reasoning_content" not in messages[0]
+
+
+def test_echo_reasoning_tolerates_a_conversation_without_an_assistant_turn():
+    """首轮请求只有 system + user，没有 assistant 可补——不该炸。"""
+    messages = [{"role": "system", "content": "S"}, {"role": "user", "content": "U"}]
+    assert echo_reasoning(messages) == messages
+
+
+def test_the_sent_payload_carries_reasoning_content(monkeypatch):
+    """钉住真实故障：不带这个字段时 DeepSeek thinking 模式回 400。"""
+    c, calls = client(monkeypatch, [FakeResponse(200, ok_body())])
+    c.complete([
+        {"role": "user", "content": "x"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "a"}]},
+        {"role": "tool", "tool_call_id": "a", "content": "o"},
+    ])
+    sent = calls[0]["payload"]["messages"]
+    assert "reasoning_content" in sent[1]
+
+
+def test_reasoning_content_counts_against_the_context_budget():
+    """它会跟着消息发出去，所以占真实预算。不数就是低估输入、照样撞 400。"""
+    from ecom_agent_rl.rollout.tokens import TokenCounter
+
+    counter = TokenCounter()
+    bare = [{"role": "assistant", "content": "买这个"}]
+    with_reasoning = [{"role": "assistant", "content": "买这个",
+                       "reasoning_content": "让我比较一下这几个商品的价格和规格" * 20}]
+    assert counter.count_messages(with_reasoning) > counter.count_messages(bare)
 
 
 def test_the_client_window_matches_the_serve_script():

@@ -86,6 +86,10 @@ class TokenCounter:
             if message.get("role") == "tool":
                 total += _TOOL_MESSAGE_EXTRA
             total += self._encode(str(message.get("content") or ""))
+            # thinking 模式的教师推理会跟着消息一起发出去（见 llm.echo_reasoning），
+            # 所以它占真实预算。不数它就是低估输入，压缩会以为还有余量、照样撞 400。
+            # 对不带这个字段的模型这一项恒为 0，不影响原有标定。
+            total += self._encode(str(message.get("reasoning_content") or ""))
             for call in message.get("tool_calls") or []:
                 function = call.get("function") or {}
                 total += self._encode(str(function.get("name") or ""))

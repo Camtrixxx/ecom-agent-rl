@@ -220,6 +220,11 @@ def _drive(
             "content": assistant.get("content") or "",
             "tool_calls": [call],
         }
+        # thinking 模式的教师要求把 reasoning_content 回传（见 llm.echo_reasoning），
+        # 所以原样留在消息里。它不会进训练样本：data/sft.py 的字段白名单会剥掉它，
+        # 学生学的是动作而不是某个教师的思维链格式。
+        if assistant.get("reasoning_content"):
+            assistant_message["reasoning_content"] = assistant["reasoning_content"]
 
         try:
             name, arguments, call_id = _tool_call_fields(call)

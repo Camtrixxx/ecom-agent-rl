@@ -201,6 +201,10 @@ class ChatClient:
             )
             self.usage.add_compaction(stats.original_tokens, stats.dropped_groups)
 
+        # 放在压缩之后：要补的是**实际发出去**的那条最后 assistant 消息。压缩可能把
+        # 原本的最后一组换成摘要，先补再压就可能补错对象。
+        sent = echo_reasoning(sent)
+
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": list(sent),
@@ -274,3 +278,31 @@ class ChatClient:
 
 class _Retry(Exception):
     """内部信号：这个响应值得重试。"""
+
+
+def echo_reasoning(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """给最后一条 assistant 消息补上 `reasoning_content`，供 thinking 模式的教师回传。
+
+    DeepSeek 的 thinking 模式要求最后一条 assistant 消息携带 `reasoning_content`，
+    否则回 HTTP 400 `invalid_request_error`。实测（回放死掉的那条轨迹）：
+
+    - 只补历史轮次的 assistant → 仍然 400；只补**最后一条** → 200。
+    - 值为空字符串也能过，说明服务端只校验字段存在性，不校验内容。
+
+    所以协议上只需要一条。但我们回传的是教师真实返回的推理，不是占位串：占位串同样
+    能过校验，却会让教师在自己伪造的推理上接着想——那是在悄悄改变它的行为，而这批
+    轨迹是要当教师示范用的。
+
+    为什么在客户端做而不在 agent 循环里：这是某个供应商的协议细节。agent 循环只该
+    知道「消息」和「工具调用」，不该知道哪家 API 要回传什么字段。压缩层同理会把
+    `reasoning_content` 随消息一起搬运，无需特殊照顾。
+
+    字段缺失时（非 thinking 模型、或压缩把那条 assistant 删了）补空字符串：对
+    thinking 模式这能过校验，对不认这个字段的模型是个会被忽略的多余键。
+    """
+    out = [dict(m) for m in messages]
+    for message in reversed(out):
+        if message.get("role") == "assistant":
+            message.setdefault("reasoning_content", "")
+            break
+    return out
