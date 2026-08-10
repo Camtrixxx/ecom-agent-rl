@@ -112,13 +112,23 @@ accepted 需采集约 7,500 条原始轨迹。
 ### 阶段 D — 训练
 
 - [ ] 8 卡分布式底座，SFT 与 GRPO 共用
-- [ ] 工具调用格式改为 `hermes`（参考实现用 `qwen3_coder`，非 Qwen2.5 格式）
+- [x] 工具调用格式改为 `hermes`（参考实现用 `qwen3_coder`，非 Qwen2.5 格式）
 - [ ] 7B 全参 SFT
 - [ ] GRPO：不 offload，`gpu_memory_utilization` 提到 0.8+，group size 按实测放大
 - [ ] ablation 并行（每个并行实验需独立环境端口，否则互抢 slot）
 
 参考实现 GRPO 的 group size 只有 4，组内优势信号方差过大，是其 RL 增益仅
 1.5 个点的一个合理怀疑方向。
+
+`hermes` 在 `serve_model.sh` 已配好，并离线验证过：vLLM 0.25.1 里解析器路径变了
+（不再是 `vllm.entrypoints.openai.tool_parsers`），改用 `register_lazy_module`
+注册表，`ToolParserManager.get_tool_parser("hermes")` 能取到
+`Hermes2ProToolParser`。12 个工具 schema 全部合法，中文 query、asin、空参数三种
+情况往返都正确。
+
+装训练依赖时注意：PyPI 的 torch==2.11.0 是 cu130 轮子，会把 cu128 覆盖回去
+（本机 driver 只到 CUDA 12.8）。`serve_model.sh` 有前置检查，训练入口还没有，
+加训练脚本时要补上同样的检查。
 
 ## 从参考实现继承什么
 
