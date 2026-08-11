@@ -63,6 +63,9 @@ def parse_args() -> argparse.Namespace:
     # 每张卡每个 micro-batch 的 token 预算。32768 = 一条最长样本单独成批。
     parser.add_argument("--tokens-per-batch", type=int, default=32768)
     parser.add_argument("--grad-accum", type=int, default=4)
+    # 算 loss 时一次上采成 fp32 的 token 数。vocab 152064 下每 4096 token 的 fp32
+    # logits 约 2.3G，是显存与速度的折中；见 forward_loss。
+    parser.add_argument("--loss-chunk-tokens", type=int, default=4096)
     parser.add_argument("--limit", type=int, default=None, help="只取前 N 条（smoke 用）")
     parser.add_argument("--max-train-steps", type=int, default=None, help="提前停（smoke 用）")
     parser.add_argument("--seed", type=int, default=42)
@@ -157,7 +160,7 @@ def main() -> None:
     from torch.optim import AdamW
     from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
 
-    from ecom_agent_rl.training.sft_dataset import collate, load_examples
+    from ecom_agent_rl.training.sft_dataset import IGNORE_INDEX, collate, load_examples
 
     accelerator = Accelerator(gradient_accumulation_steps=args.grad_accum)
     set_seed(args.seed)
@@ -239,6 +242,12 @@ def main() -> None:
 
         用 sum 而不是 mean：调用方要按全局 token 数归一（见模块 docstring），
         拿到 mean 就没法还原权重了。
+
+        loss 分块算，因为 vocab 是 152064：一个 32k token 的批，logits 本身 bf16
+        就要 9.1G，整体 `.float()` 再要 18.2G——这一个上采就够把 80G 卡打爆
+        （实测 backward 里 "Tried to allocate 18.31 GiB" 而 GPU 只剩 14.4G）。
+        按序列切块后同时只有一块被上采成 fp32，峰值降到约 1/N，数值上完全等价：
+        reduction="sum" 对分块求和满足结合律。
         """
         batch = collate([source[i] for i in indices], pad_token_id=pad_token_id)
         batch = {k: v.to(accelerator.device) for k, v in batch.items()}
@@ -247,13 +256,23 @@ def main() -> None:
         )
         logits = outputs.logits[:, :-1, :]
         labels = batch["labels"][:, 1:]
-        loss = torch.nn.functional.cross_entropy(
-            logits.reshape(-1, logits.size(-1)).float(),
-            labels.reshape(-1),
-            ignore_index=-100,
-            reduction="sum",
-        )
-        return loss, int((labels != -100).sum().item())
+        flat_logits = logits.reshape(-1, logits.size(-1))
+        flat_labels = labels.reshape(-1)
+
+        total = flat_labels.numel()
+        chunk = max(1, int(args.loss_chunk_tokens))
+        loss = None
+        for start in range(0, total, chunk):
+            piece = torch.nn.functional.cross_entropy(
+                flat_logits[start : start + chunk].float(),
+                flat_labels[start : start + chunk],
+                ignore_index=IGNORE_INDEX,
+                reduction="sum",
+            )
+            loss = piece if loss is None else loss + piece
+        if loss is None:
+            loss = flat_logits.sum() * 0.0
+        return loss, int((labels != IGNORE_INDEX).sum().item())
 
     @torch.no_grad()
     def evaluate() -> float | None:
