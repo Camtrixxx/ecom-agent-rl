@@ -12,6 +12,7 @@
 bash scripts/setup_environment.sh          # 一次性：装依赖 + 校验商品数据 + 建索引
 bash scripts/start_environment.sh          # 环境池：8 worker × 4 slot，端口 5700+
 bash scripts/serve_model.sh <权重路径>      # 被测模型的 vLLM 服务，默认端口 8180
+python scripts/check_environment.py        # 可选：量环境池还剩多少 slot，有泄漏则退出码 1
 ```
 
 | 阶段 | 目标 | 入口 |
