@@ -187,6 +187,40 @@ instruction 与目标商品的 title/shop_name 中；`_explicit_models` 要求�
 - 客户端并发设成 worker 数；调大只会让尾延迟爆掉而吞吐不变。
 - rollout、评测、教师采集三处共用同一个池子。并行跑 ablation 时每个实验必须用
   独立的 `SHOPSIM_BASE_PORT` 段，否则互抢。
+- 「互抢」的机制值得说清，因为它不是简单的并发数相加超限：`EnvironmentPool` 的
+  `BoundedSemaphore(slots_per_worker)` 是**每个客户端池各自一份**的。两个进程各自
+  以为自己在某个 worker 上独占 4 个租约，实际服务端那个 worker 只有 4 个，于是
+  8 个请求抢 4 个 slot。同端口段上永远只跑一个客户端池——串行，或者分端口段。
+
+## slot 会泄漏，而且默认看不见
+
+服务端的 slot 租约**不会自动回收**。`pack_api.py` 只在收到 `release_one` 时释放；
+客户端 `pool.py` 的 `_release_env` 又只在 reset 已经拿到 `env_idx` 之后的内层
+`finally` 里调用。任何在「服务端已 `slot_pool.acquire()`、客户端尚未持有 env_idx」
+之间断掉的回合，都会把那个 slot 永久占住，而且**不会打印 `failed to release`**
+（那条告警只覆盖归还请求本身失败的情况）。
+
+实测代价：连着跑完 SFT 补采样（1,475 回合）和两轮中止的 baseline 之后，全池
+**32 个 slot 泄漏 25 个**，8 个 worker 里 7 个只剩 1 个可用、1 个是 0。
+
+诊断时有两个陷阱：
+
+- **每个 worker 只试租 1 个是测不出来的**——剩 1 个空位也会返回成功。必须一次性
+  试租满 `slots_per_worker` 个再看能拿到几个。
+- **满了的 worker 不快速失败**：`MAX_RETRIES=5` × `RETRY_DELAY_SECONDS=5`，服务端
+  会把请求挂住 **25 秒**才返回 `Unable to get available environment resource`。
+  探测脚本按「每端口一次失败 = 25s」估时，否则会以为是自己卡死。
+
+现象上，泄漏表现为「并发明明没超也报 `env_error`」：有效容量已经从 32 掉到 7，
+而 `env_error` ∈ `INFRA_FAILURES` → `run_batch` 中止整批。所以先量容量再调并发，
+不要一看到 `env_error` 就往下调并发——那是在给一个错误的解释配一个无效的药。
+
+修复：**没有 rollout 在跑时**对每个 worker 发 `release_all`（服务端会
+`slot_pool.reset()`），实测 25/32 泄漏可一次性恢复到 32/32。注意 `release_all`
+会清掉该 worker 上**全部**租约，并行跑别的实验时用它等于掐断对方在飞的回合。
+
+长跑前后各量一次容量是便宜的保险。中止本身无损——`env_error` 进 `.failures.jsonl`
+不占 attempt，重跑同一条命令按 `(task_id, attempt)` 续跑。
 - 机器 128 核。32 worker 是当前验证过的配置；留出的核给训练进程和 vLLM。
 
 参考点：按 133 ep/s 算，7,500 条教师轨迹的采集时间约 1 分钟量级的环境开销——

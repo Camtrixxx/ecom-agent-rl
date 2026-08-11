@@ -4,14 +4,27 @@
 
 ## 流水线
 
-沿用四阶段主线，每阶段可独立运行与复现：
+沿用四阶段主线，每阶段可独立运行与复现。
+
+前置（每次开新 shell 都要）：
+
+```bash
+bash scripts/setup_environment.sh          # 一次性：装依赖 + 校验商品数据 + 建索引
+bash scripts/start_environment.sh          # 环境池：8 worker × 4 slot，端口 5700+
+bash scripts/serve_model.sh <权重路径>      # 被测模型的 vLLM 服务，默认端口 8180
+```
 
 | 阶段 | 目标 | 入口 |
 |---|---|---|
-| Baseline | 测量原始 Qwen2.5-7B-Instruct 的工具使用能力 | `bash scripts/baseline.sh` |
-| SFT | 从教师轨迹学习合法、完整的购物行为 | `bash scripts/sft.sh` |
-| GRPO | 在真实环境 Rollout 中优化 Reward v3 | `bash scripts/grpo.sh` |
-| Evaluation | 在同一批留出任务上公平比较三个模型 | `bash scripts/evaluate.sh NAME` |
+| 数据 | 抽三个 task_id 零重叠的任务池 | `python scripts/build_task_pools.py` |
+| Baseline | 测量原始 Qwen2.5-7B-Instruct 的工具使用能力 | `python scripts/run_rollout.py --pool data/task_pools/evaluation.jsonl --out outputs/rollouts/baseline.jsonl` |
+| SFT | 从教师轨迹学习合法、完整的购物行为 | `bash scripts/collect_teacher.sh` → `python scripts/build_sft_dataset.py` → `bash scripts/train_sft.sh` |
+| GRPO | 在真实环境 Rollout 中优化 Reward v3 | 尚未实现 |
+| Evaluation | 在同一批留出任务上公平比较模型 | `run_rollout.py --attempts k` → `python scripts/report_metrics.py --trajectories <轨迹> --baseline <对照> --pool <池>` |
+
+`run_rollout.py` 是 baseline 评测、教师采集、smoke 三者共用的入口，区别只在
+`--pool` / `--out` / `--base-url`；被中断后重跑同一条命令即按 `(task_id, attempt)`
+续跑。并发有实测上限，见 [docs/environment-notes.md](docs/environment-notes.md)。
 
 ## 环境
 
@@ -35,7 +48,8 @@ WebShop 式基础壳子；Environment v2.1 与 Reward v3 的 engine 层（约 3,
 |---|---|---|
 | 模型 | Qwen3.5-2B（多模态） | Qwen2.5-7B-Instruct（纯文本） |
 | 训练卡数 | 1（参数+优化器双 offload） | 8（不 offload） |
-| SFT 数据 | 800 / 200 | 3,000 / 500 |
+| SFT 任务池 | — （val 从 accepted 里切） | 3,000 / 500（train 与 val 任务零重叠） |
+| SFT 数据集行数 | 800 / 200 | 1,781 / 299（接受率 0.5937） |
 | GRPO 任务 | 1,000 / 50 | 3,000 / 200 |
 | 评测集 | 200 题 × 1 次 rollout | 500 题 × k 次采样 |
 | 评测执行 | 串行 | 并行 |
