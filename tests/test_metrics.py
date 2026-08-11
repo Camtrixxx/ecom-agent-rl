@@ -93,6 +93,22 @@ def test_missing_terminal_falls_back_to_a_labelled_status():
 
 
 @pytest.mark.parametrize("kind", sorted(REWARD_VALUES))
+def test_top_level_and_audit_read_paths_agree(kind: str):
+    """顶层 reward_type / reward_valid 是后加的字段，`outputs/rollouts/` 里已有的
+    baseline 与 SFT 轨迹没有它，只能回落到 audit。同一份数据换个读法就换个数是
+    最糟的结果，所以两条路必须逐字段一致。"""
+    old = record(1, kind, reward_valid=False)
+    new = dict(old, reward_type=kind, reward_valid=False)
+    assert outcome_from_record(new) == outcome_from_record(old)
+
+    # 没有终局时顶层是 None（不是缺字段），不能因此丢掉 status 兜底标签。
+    no_terminal = dict(
+        record(1, None, status="max_steps"), reward_type=None, reward_valid=True
+    )
+    assert outcome_from_record(no_terminal).reward_type == "no_terminal:max_steps"
+
+
+@pytest.mark.parametrize("kind", sorted(REWARD_VALUES))
 def test_only_gold_and_valid_alternative_count_as_success(kind: str):
     outcome = outcome_from_record(record(1, kind))
     assert outcome.success is (kind in SUCCESS_TYPES)

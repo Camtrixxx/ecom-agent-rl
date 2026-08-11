@@ -29,7 +29,7 @@ from typing import Any, Mapping
 from ..environment import observation as obs
 from ..environment import tools
 from ..environment.pool import EnvironmentPool, EnvironmentServiceError
-from .llm import ChatClient, ContextOverflowError, EmptyResponseError, LLMError
+from .llm import ChatClient, ContextOverflowError, EmptyResponseError, LLMError, Usage
 from .prompt import SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -80,9 +80,26 @@ class Trajectory:
     rejections: list[dict[str, Any]] = field(default_factory=list)
     # 答案与奖励只进这里。名字就是警告：不要放进 prompt，也不要喂给 Judge。
     audit: dict[str, Any] = field(default_factory=dict)
+    # `reward` 是 None 就表示**没有可用的标量**，只有两种成因：回合没走到终局，
+    # 或者环境判了 `reward_valid=False`。下面这两个字段用来区分这两种成因。
+    #
+    # 为什么不把不可信的 0.0 留在这里：`reward_unverifiable` 的取值恰好是 0.0，而
+    # 0.0 在 -0.85 ~ 1.0 的区间里是个完全正常的中间值。GRPO 按组算优势，一条
+    # 「其实是缺数据」的 0.0 会被当成「不好不坏」参与基线，静默偏移整组的优势信号。
+    # 置 None 让「拿 0.0 当真值」在数值上直接不可能——误用会炸，不会悄悄错。
+    # 具体的 mask / 罚分策略留到 GRPO 的奖励整形时定，这里只保证信息不丢也不骗人。
     reward: float | None = None
+    # 环境的权威终局标签（`reward_detail.reward_type`），没走到终局则为 None。
+    reward_type: str | None = None
+    # 环境对自己这次打分的信任度。默认 True 与环境一致：没走到终局不代表打分不可信，
+    # 只代表没有打分——那种情况由 `reward_type is None` 表达。
+    reward_valid: bool = True
     done: bool = False
     error: str | None = None
+    # 这一个回合的 token 与压缩用量。批级计数（`ChatClient.usage`）能说明压缩在链路里
+    # 生效了，但说明不了是哪些回合被压缩过——`repeat_loop` 的回合明显更长、也几乎都
+    # 被压缩过，要判断压缩是不是在制造它就必须能按回合对照（roadmap 阶段 D 末尾）。
+    usage: dict[str, int] = field(default_factory=dict)
 
     @property
     def env_steps(self) -> int:
@@ -100,12 +117,15 @@ class Trajectory:
             "status": self.status,
             "done": self.done,
             "reward": self.reward,
+            "reward_type": self.reward_type,
+            "reward_valid": self.reward_valid,
             "env_steps": self.env_steps,
             "rejection_count": len(self.rejections),
             "messages": self.messages,
             "steps": self.steps,
             "rejections": self.rejections,
             "audit": self.audit,
+            "usage": self.usage,
             "error": self.error,
         }
 
@@ -143,6 +163,7 @@ def run_episode(
 ) -> Trajectory:
     """跑一个回合。任何异常都收进 `Trajectory.status`，不向外抛。"""
     trajectory = Trajectory(task_id=task_id, attempt=attempt)
+    episode_usage = Usage()
     try:
         with pool.episode(task_id) as episode:
             _drive(
@@ -153,6 +174,7 @@ def run_episode(
                 max_consecutive_rejections=max_consecutive_rejections,
                 max_rejections=max_rejections,
                 system_prompt=system_prompt,
+                usage=episode_usage,
             )
     except EnvironmentServiceError as exc:
         trajectory.status = Status.ENV_ERROR
@@ -172,6 +194,10 @@ def run_episode(
     except LLMError as exc:
         trajectory.status = Status.LLM_ERROR
         trajectory.error = f"{type(exc).__name__}: {exc}"
+    finally:
+        # 失败的回合也要记用量：撞上下文超限的那些恰恰是压缩压力最大的样本，
+        # 只记成功回合会把这个分布裁掉一头。
+        trajectory.usage = episode_usage.snapshot()
     return trajectory
 
 
@@ -184,6 +210,7 @@ def _drive(
     max_consecutive_rejections: int,
     max_rejections: int,
     system_prompt: str,
+    usage: Usage | None = None,
 ) -> None:
     reset_allowed, reset_blocked = obs.split_env_payload(episode.reset_result)
     trajectory.audit["reset_blocked"] = reset_blocked
@@ -200,7 +227,7 @@ def _drive(
 
     consecutive_rejections = 0
     while len(trajectory.steps) < max_steps:
-        assistant = client.complete(trajectory.messages, tools.TOOL_SCHEMAS)
+        assistant = client.complete(trajectory.messages, tools.TOOL_SCHEMAS, usage=usage)
         calls = list(assistant.get("tool_calls") or [])
 
         if not calls:
@@ -292,6 +319,21 @@ def _drive(
             trajectory.done = True
             trajectory.reward = result.reward
             trajectory.audit["terminal"] = blocked
+            # 终局标签与可信度从 audit 提到顶层：下游要判断这条能不能进训练，不该
+            # 被迫去翻一个名字就写着「不要读」的字段。audit 里的原文照旧保留。
+            terminal = blocked or {}
+            detail = terminal.get("reward_detail") or {}
+            reward_type = detail.get("reward_type")
+            trajectory.reward_type = str(reward_type) if reward_type else None
+            # 环境把 `reward_valid` 同时放在终局 payload 顶层和 `reward_detail` 里。
+            # 4,000 条已有轨迹里两处从未不一致，但两处都读、有一处说不可信就算不可信：
+            # 这个字段唯一的作用就是拦下不可信的分，读漏一处等于白加。
+            trajectory.reward_valid = (
+                terminal.get("reward_valid", True) is not False
+                and detail.get("reward_valid", True) is not False
+            )
+            if not trajectory.reward_valid:
+                trajectory.reward = None
             return
 
         if result.over:

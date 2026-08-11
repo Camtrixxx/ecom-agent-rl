@@ -73,14 +73,22 @@ class Outcome:
 def outcome_from_record(record: Mapping[str, Any]) -> Outcome:
     """从轨迹记录抽出评测结论。
 
-    `reward_type` 取自 `audit.terminal.reward_detail`——环境的权威标签。回合没正常
-    结束（模型不调工具、被拒判死、跑满步数）时环境没给标签，用轨迹 status 兜底，
-    这些都算失败，但要能在报告里和「环境判定的失败」区分开。
+    `reward_type` 是环境的权威标签。回合没正常结束（模型不调工具、被拒判死、跑满
+    步数）时环境没给标签，用轨迹 status 兜底，这些都算失败，但要能在报告里和
+    「环境判定的失败」区分开。
+
+    优先读轨迹顶层，回落到 `audit.terminal.reward_detail`：顶层字段是后加的，
+    `outputs/rollouts/` 里已有的 baseline / SFT 轨迹没有它，两条路必须给出同一个
+    结论，否则同一份数据换个读法就换个数。
     """
     audit = record.get("audit") or {}
     terminal = audit.get("terminal") or {}
     detail = terminal.get("reward_detail") or {}
-    reward_type = str(detail.get("reward_type") or f"no_terminal:{record.get('status')}")
+    reward_type = str(
+        record.get("reward_type")
+        or detail.get("reward_type")
+        or f"no_terminal:{record.get('status')}"
+    )
     return Outcome(
         task_id=int(record["task_id"]),
         attempt=int(record.get("attempt", 0)),
@@ -92,7 +100,9 @@ def outcome_from_record(record: Mapping[str, Any]) -> Outcome:
         env_steps=int(record.get("env_steps") or 0),
         rejections=int(record.get("rejection_count") or 0),
         # reward_valid=False 表示环境自己认为这次打分不可信，不该计入主指标。
-        reward_valid=bool(detail.get("reward_valid", True)),
+        reward_valid=bool(
+            record.get("reward_valid", detail.get("reward_valid", True))
+        ),
     )
 
 

@@ -377,6 +377,26 @@ def test_an_oversized_prompt_is_compacted_before_being_sent(monkeypatch):
     assert snapshot["peak_original_tokens"] > c.input_budget
 
 
+def test_a_per_call_usage_sink_gets_the_same_numbers_as_the_batch_counter(monkeypatch):
+    """每回合计数与批级计数必须共用一套累加逻辑，否则两个数迟早分叉。
+
+    这是「压缩是否在制造 repeat_loop」那条线索唯一缺的测量手段：批级计数说明压缩
+    生效了，但分不出哪些回合被压过。
+    """
+    c, _ = client(monkeypatch, [FakeResponse(200, ok_body())] * 2,
+                  context_window=2000, max_tokens=200, context_margin=50,
+                  token_counter=CountingCounter())
+    per_episode = Usage()
+    c.complete(long_conversation(30), usage=per_episode)
+    assert per_episode.snapshot() == c.usage.snapshot()
+
+    # 第二次不传 sink：批级继续涨，每回合的停在原地。
+    before = per_episode.snapshot()
+    c.complete(long_conversation(30))
+    assert per_episode.snapshot() == before
+    assert c.usage.snapshot()["compactions"] == before["compactions"] * 2
+
+
 def test_compaction_does_not_mutate_the_caller_s_messages(monkeypatch):
     """trajectory.messages 是要写盘的训练数据，必须保持完整。"""
     c, _ = client(monkeypatch, [FakeResponse(200, ok_body())],

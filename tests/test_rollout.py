@@ -16,6 +16,7 @@ import pytest
 
 from ecom_agent_rl.environment.observation import OBSERVATION_VERSION
 from ecom_agent_rl.rollout.agent import Status, run_episode
+from ecom_agent_rl.rollout.llm import Usage
 from conftest import SEARCH_HOME, detail_state, search_state
 
 
@@ -30,20 +31,23 @@ def tool_call(name: str, arguments: dict[str, Any], call_id: str = "c1") -> dict
 class FakeClient:
     """按脚本依次返回 assistant 消息。脚本用完还被调用就是测试写错了。"""
 
-    def __init__(self, script: list[dict[str, Any]]) -> None:
+    def __init__(
+        self, script: list[dict[str, Any]], compactions_per_call: int = 0
+    ) -> None:
         self.script = list(script)
         self.seen: list[list[dict[str, Any]]] = []
+        self.compactions_per_call = compactions_per_call
+        # 用真的 Usage：每回合计数与批级计数共用同一套累加逻辑，假一个就测不到分叉。
+        self.usage = Usage()
 
-        class _Usage:
-            def snapshot(self) -> dict[str, int]:
-                return {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
-
-        self.usage = _Usage()
-
-    def complete(self, messages, tools=None):
+    def complete(self, messages, tools=None, usage=None):
         self.seen.append([dict(m) for m in messages])
         if not self.script:
             raise AssertionError("模型被调用的次数超出脚本")
+        for sink in (self.usage,) if usage is None else (self.usage, usage):
+            sink.add({"prompt_tokens": 100, "completion_tokens": 10})
+            if self.compactions_per_call:
+                sink.add_compaction(9000, self.compactions_per_call)
         return self.script.pop(0)
 
 
@@ -122,8 +126,8 @@ def step_payload(state: dict[str, Any], **extra: Any) -> dict[str, Any]:
     return payload
 
 
-def run(script, steps, reset_state=None, **kwargs):
-    client = FakeClient(script)
+def run(script, steps, reset_state=None, compactions_per_call=0, **kwargs):
+    client = FakeClient(script, compactions_per_call=compactions_per_call)
     episode = FakeEpisode(reset_payload(reset_state), steps)
     trajectory = run_episode(
         pool=FakePool(episode), client=client, task_id=7, **kwargs
@@ -155,6 +159,88 @@ def test_answer_fields_are_kept_in_audit_for_offline_use():
     assert trajectory.reward == 1.0
     assert trajectory.audit["reset_blocked"]["goal_options"]
     assert trajectory.audit["terminal"]["goal"] == {"asin": "900000000000"}
+
+
+def test_terminal_label_is_hoisted_to_the_trajectory_top_level():
+    """终局标签要能不翻 audit 就读到：audit 这个名字本身就是「别读我」。"""
+    trajectory, _, _ = run(
+        [{"tool_calls": [tool_call("search_products", {"query": "狗狗衣服"})]}],
+        [step_payload(search_state(), done=True, reward=1.0,
+                      reward_detail={"reward_type": "gold_purchase", "reward_valid": True})],
+    )
+    record = trajectory.as_record()
+    assert record["reward_type"] == "gold_purchase"
+    assert record["reward_valid"] is True
+    assert record["reward"] == 1.0
+
+
+def test_an_unverifiable_reward_is_never_exposed_as_the_number_zero():
+    """`reward_unverifiable` 的取值恰好是 0.0，而 0.0 在 -0.85~1.0 里是正常的中间值。
+
+    留着它，GRPO 按组算优势时会把一条「其实是缺数据」的轨迹当成「不好不坏」算进
+    基线，静默偏移整组的信号。置 None 让误用变成显式的 TypeError。
+    """
+    trajectory, _, _ = run(
+        [{"tool_calls": [tool_call("search_products", {"query": "狗狗衣服"})]}],
+        [step_payload(search_state(), done=True, reward=0.0,
+                      reward_detail={"reward_type": "reward_unverifiable",
+                                     "reward_valid": False})],
+    )
+    record = trajectory.as_record()
+    assert record["reward"] is None, "不可信的 0.0 仍然可以被当成真值读出去"
+    assert record["reward_valid"] is False
+    assert record["reward_type"] == "reward_unverifiable"
+    # 原始判定照旧留在 audit 里，剥离不等于丢掉。
+    assert trajectory.audit["terminal"]["reward_detail"]["reward_valid"] is False
+
+
+def test_an_episode_without_a_terminal_has_no_reward_type():
+    """没走到终局与「打分不可信」是两件事，不能挤进同一个字段。
+
+    reward_valid 沿用环境的默认 True：没有打分不等于打分不可信，「有没有分」由
+    reward_type 是不是 None 表达。指标层靠这条区分「模型的失败」和「缺数据」。
+    """
+    trajectory, _, _ = run(
+        [{"content": "我觉得应该搜一下 open_product(...)"}],
+        [],
+    )
+    record = trajectory.as_record()
+    assert record["status"] == Status.NO_TOOL_CALL
+    assert record["reward"] is None
+    assert record["reward_type"] is None
+    assert record["reward_valid"] is True
+
+
+def test_compaction_is_counted_per_episode_not_only_per_batch():
+    """批级计数说明「压缩生效了」，但说明不了「哪些回合被压缩过」。
+
+    roadmap 阶段 D 有条没定论的线索：`repeat_loop` 的回合明显更长、也几乎都被压缩
+    过，而买对的回合多数没有。要判断压缩是不是在制造 `repeat_loop`，就得能按回合
+    做等步数对照——只有批级计数是做不了的。
+    """
+    trajectory, client, _ = run(
+        [
+            {"tool_calls": [tool_call("search_products", {"query": "狗狗衣服"})]},
+            {"tool_calls": [tool_call("open_product", {"asin": "900000000000"})]},
+        ],
+        [step_payload(search_state()), step_payload(detail_state(), done=True, reward=1.0)],
+        compactions_per_call=1,
+    )
+    usage = trajectory.as_record()["usage"]
+    assert usage["calls"] == 2
+    assert usage["compactions"] == 2
+    assert usage["peak_original_tokens"] == 9000
+    # 批级计数必须同步走，不能被每回合的计数器截走。
+    assert client.usage.snapshot()["compactions"] == 2
+
+
+def test_a_failed_episode_still_records_its_usage():
+    """撞上下文超限的回合恰恰是压缩压力最大的样本，漏记它会把分布裁掉一头。"""
+    client = FakeClient([{"content": "我不动手"}], compactions_per_call=1)
+    episode = FakeEpisode(reset_payload(), [])
+    trajectory = run_episode(pool=FakePool(episode), client=client, task_id=7)
+    assert trajectory.status == Status.NO_TOOL_CALL
+    assert trajectory.as_record()["usage"]["compactions"] == 1
 
 
 def test_the_first_user_message_contains_the_initial_observation():
@@ -309,15 +395,12 @@ class _RaisingClient:
         self.exc = exc
         self.after = after
         self.calls = 0
+        self.usage = Usage()
 
-        class _Usage:
-            def snapshot(self) -> dict[str, int]:
-                return {}
-
-        self.usage = _Usage()
-
-    def complete(self, messages, tools=None):
+    def complete(self, messages, tools=None, usage=None):
         self.calls += 1
+        for sink in (self.usage,) if usage is None else (self.usage, usage):
+            sink.add_compaction(9000, 1)
         if self.calls > self.after:
             raise self.exc
         # 动作要跟着页面走，否则守卫会拒掉（搜过之后就不在搜索首页了），

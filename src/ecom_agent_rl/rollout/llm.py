@@ -185,12 +185,20 @@ class ChatClient:
         self,
         messages: Sequence[Mapping[str, Any]],
         tools: Sequence[Mapping[str, Any]] | None = None,
+        usage: "Usage | None" = None,
     ) -> dict[str, Any]:
         """返回 assistant message（含 `tool_calls`），失败重试后仍不行则 raise。
 
         配了 `context_window` 时，超预算的历史会先被压缩（见 `context.py`）：
         长回合的 prompt 会超 24576，不压缩就是 HTTP 400、回合到此为止。
+
+        `usage` 是可选的第二个计数器，与批级 `self.usage` 同步累加。批级计数回答
+        「压缩在真实链路里生效了吗」，但回答不了「哪些回合被压缩过」——想验证
+        「压缩是否在制造 `repeat_loop`」就需要按回合对照（见 roadmap 阶段 D 末尾
+        那条没有定论的线索）。调用方传一个每回合的 `Usage` 进来即可，两个计数器
+        共用同一套 `add` / `add_compaction`，不会分叉成两种口径。
         """
+        sinks = (self.usage,) if usage is None else (self.usage, usage)
         sent: Sequence[Mapping[str, Any]] = messages
         budget = self.input_budget
         if budget is not None:
@@ -199,7 +207,8 @@ class ChatClient:
             sent, stats = compact_messages(
                 messages, self._counter().counter_for(tools), budget
             )
-            self.usage.add_compaction(stats.original_tokens, stats.dropped_groups)
+            for sink in sinks:
+                sink.add_compaction(stats.original_tokens, stats.dropped_groups)
 
         # 放在压缩之后：要补的是**实际发出去**的那条最后 assistant 消息。压缩可能把
         # 原本的最后一组换成摘要，先补再压就可能补错对象。
@@ -258,7 +267,9 @@ class ChatClient:
                 if not (message.get("tool_calls") or message.get("content")):
                     last = "HTTP 200 但 message 既无 content 也无 tool_calls"
                     last_was_empty = True
-                    self.usage.add(body.get("usage"))  # 空响应也计费，要记进用量
+                    # 空响应也计费，要记进用量。
+                    for sink in sinks:
+                        sink.add(body.get("usage"))
                     raise _Retry(last)
             except (requests.RequestException, _Retry, ValueError, KeyError, IndexError) as exc:
                 last = f"{type(exc).__name__}: {exc}"
@@ -271,7 +282,8 @@ class ChatClient:
                 # 指数退避 + 抖动：并发 worker 同时失败时不要同步重试。
                 time.sleep(min(2.0 ** attempt, 8.0) * (0.5 + random.random()))
                 continue
-            self.usage.add(body.get("usage"))
+            for sink in sinks:
+                sink.add(body.get("usage"))
             return dict(message)
         raise LLMError(f"{url}: unreachable, last={last}")
 
