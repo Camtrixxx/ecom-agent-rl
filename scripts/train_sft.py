@@ -225,12 +225,22 @@ def main() -> None:
     optimizer = AdamW(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=(0.9, 0.95)
     )
+    model, optimizer = accelerator.prepare(model, optimizer)
+    # scheduler 建在 prepare 之后，且故意不交给 prepare 包装，两件事都是必需的：
+    #
+    # 不交给 prepare：它的包装器假定「dataloader 的 batch 被乘了 num_processes」，于是每
+    # 调一次 step() 就把内部计数往前推 num_processes 步（accelerate/scheduler.py:75-76）。
+    # 我们是自己分批分卡的，一步就该是一步。被包过会让 warmup 在第一步就走完、余弦半周期
+    # 在 81/6≈13.5 步跑完然后开始振荡，训练结束时 lr 回到约 0.96e-5——等于完全没退火，
+    # 而日志里的 loss 照样在降（实测 step 1 lr 已是 9.94e-6，step 13 掉到 3.6e-8 又爬回）。
+    #
+    # 建在 prepare 之后：prepare 返回的可能不是传进去的那个 optimizer 对象，scheduler 必须
+    # 绑在真正被 step 的那个上，否则 lr 改了也不生效。
     scheduler = get_cosine_schedule_with_warmup(
         optimizer,
         num_warmup_steps=int(total_steps * args.warmup_ratio),
         num_training_steps=total_steps,
     )
-    model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     log_path = args.out_dir / "train_log.jsonl"
