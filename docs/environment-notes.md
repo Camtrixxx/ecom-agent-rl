@@ -324,6 +324,42 @@ cpio 手工解（`070701` magic + 13 个 8 位十六进制字段）。解包脚�
 配套的守卫比较的是 `cuDriverGetVersion`（compat 生效后的实际能力）而不是
 `nvidia-smi` 的内核模块版本——后者恒为 12.8，用它比会把正确配置误判成错误。
 
+## 从训练进程里起 vLLM 要先洗环境变量
+
+GRPO 每轮换权重都要重起 vLLM，而 vLLM 是 `accelerate launch` 的孙进程，默认继承全部
+环境变量。其中 **`TORCHELASTIC_USE_AGENT_STORE=True` 会让 vLLM 起不来**：torch 的
+`_create_c10d_store` 见到它就认定 TCPStore 由 elastic agent 提供，于是不启 daemon，
+让那个 `world_size=1` 的进程组只作为 client 去连自己随机选的端口——没人监听，死等到
+600 s 超时。
+
+这个故障极难对上原因：报错是 `client socket has timed out`，字面上和 vLLM、和 GRPO
+都无关；手工跑 `serve_model.sh` 因为没有这些变量，永远是好的。`RANK` / `WORLD_SIZE` /
+`MASTER_*` 同理会让 vLLM 误判自己的拓扑。
+
+`train_grpo.py` 的 `clean_torchrun_env()` 在 fork 前剥掉 `TORCHELASTIC_*`、
+`ACCELERATE_*`、`FSDP_*` 及 rank 一族，业务变量（`no_proxy`、`LD_LIBRARY_PATH`、key）
+原样传下去——剥太狠会让 vLLM 连不上环境池，同样是静默失败，所以两个方向都有测试钉住。
+
+## GRPO 采样的并发工作点
+
+`benchmark_environment.py` 量的是环境池自己的上限（纯 step，不含推理）。真正决定
+GRPO 每轮多久的是**带模型推理的端到端吞吐**，两者差一个数量级，必须单独量。在
+`grpo_train` 池上用 SFT 权重实测（单卡 vLLM，TP=1）：
+
+| 并发 | 回合 | 耗时 | 吞吐 | LLM 调用 |
+|---|---|---|---|---|
+| 8 | 32 | 121.9 s | 0.26 ep/s | 597 |
+| 16 | 48 | 145.2 s | **0.33 ep/s** | 904 |
+| 32 | 64 | 196.5 s | 0.33 ep/s | 1202 |
+
+16 → 32 吞吐一动不动，多出来的并发全部堵在 vLLM 队列里，只是把每回合的延迟拉长。
+**工作点取 16。**
+
+瓶颈在推理侧而不是环境侧，且是 **prefill-bound**：一轮 smoke 的 276 次调用里 prompt
+264.6 万 token、completion 只有 9,782 token，比例 270:1。多轮 agent 每步都要把整段
+历史重新喂进去，观测又长。所以加并发不会有收益——prefix caching 已经开着（vLLM
+`enable_prefix_caching=True`），没有更多余量可挤；要提吞吐只能给 vLLM 加卡。
+
 ## 复现
 
 ```bash

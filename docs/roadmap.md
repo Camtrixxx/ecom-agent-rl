@@ -169,7 +169,7 @@ Baseline 实测（500 题 × 4 次采样 = 2,000 条，Qwen2.5-7B-Instruct 原�
 - [x] 8 卡分布式底座，SFT 与 GRPO 共用
 - [x] 工具调用格式改为 `hermes`（参考实现用 `qwen3_coder`，非 Qwen2.5 格式）
 - [x] 7B 全参 SFT
-- [ ] GRPO：不 offload，`gpu_memory_utilization` 提到 0.8+，group size 按实测放大
+- [x] GRPO：不 offload，`gpu_memory_utilization` 0.85，group size 按实测放大到 8
 - [ ] ablation 并行（每个并行实验需独立环境端口，否则互抢 slot）
 
 SFT 实测（权重 `outputs/models/sft`，日志 `outputs/logs/sft_full.log`，血缘
@@ -267,6 +267,26 @@ token 与压缩次数（`compactions` / `dropped_groups` / `peak_original_tokens
 参考实现 GRPO 的 group size 只有 4，组内优势信号方差过大，是其 RL 增益仅
 1.5 个点的一个合理怀疑方向。本项目 SFT 已经把成功率推到 0.61，GRPO 的提升空间和
 参考实现（SFT 60.5% → GRPO 62.0%）不在同一个起点上，group size 与 KL 系数都要重调。
+
+group size 用实测回报分布做了模拟：G=4 有 1.795% 的组全组同结局（整组白跑），
+组内极差均值 1.388；G=8 降到 0.010% / 1.688；G=16 是 0.000% / 1.784。收益的拐点在
+G=8，再往上只是线性地加采样成本。**取 G=8**。（模拟按边际分布 i.i.d. 抽，忽略了同题
+内部的相关性，真实的死组率会比这高；但三档的排序不受影响。）
+
+KL 系数取 **0**，不要 reference model（DAPO 的做法）。省下来的是每卡 ~2.3 GB 显存和
+一整次前向（约占单步时间的 40%）——在一个采样已经占七成 wall-clock 的循环里，这次
+前向买到的只是一个「别漂太远」的软约束。换成三件更直接的：lr 压到 1e-6、梯度裁剪
+1.0、每轮记回报与 reward_type 分布。漂移会先在后者上看见，而不是等 KL 报警。
+
+μ 取 1（一个 batch 只走一次梯度），于是重要性比恒等于 1，clip 是恒等操作——不实现它，
+而不是实现一个永远不生效的分支。loss 直接写成极限形式 `Σ A·CE / Σ 1`，等价于带基线的
+策略梯度 `−Σ A·log πθ`，还能原样复用 SFT 那段分块 fp32 上采的 CE（`tests/test_grpo.py`
+里两条测试分别钉住「加权 CE == −Σ A·logπ」和「分块求和 == 整体求和」）。
+
+权重同步用**重启 vLLM**，不是 RPC 热更新。热更新要对上 vLLM 内部的参数排布再加一个
+NCCL 组，而它失败的方式是静默的——服务照常应答，只是用的还是旧权重，训练曲线上看不
+出来。重启是幂等的，代价是每轮约 2 分钟。写权重前必须先停服务：从第 2 轮起被覆盖的
+正是 vLLM 当前 mmap 着的目录，覆盖同名文件不会报错，只会让推理结果变成垃圾。
 
 `hermes` 在 `serve_model.sh` 已配好，并离线验证过：vLLM 0.25.1 里解析器路径变了
 （不再是 `vllm.entrypoints.openai.tool_parsers`），改用 `register_lazy_module`

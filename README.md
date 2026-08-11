@@ -20,7 +20,7 @@ python scripts/check_environment.py        # 可选：量环境池还剩多少 s
 | 数据 | 抽三个 task_id 零重叠的任务池 | `python scripts/build_task_pools.py` |
 | Baseline | 测量原始 Qwen2.5-7B-Instruct 的工具使用能力 | `python scripts/run_rollout.py --pool data/task_pools/evaluation.jsonl --out outputs/rollouts/baseline.jsonl` |
 | SFT | 从教师轨迹学习合法、完整的购物行为 | `bash scripts/collect_teacher.sh` → `python scripts/build_sft_dataset.py` → `bash scripts/train_sft.sh` |
-| GRPO | 在真实环境 Rollout 中优化 Reward v3 | 尚未实现 |
+| GRPO | 在真实环境 Rollout 中优化 Reward v3 | `bash scripts/train_grpo.sh` |
 | Evaluation | 在同一批留出任务上公平比较模型 | `run_rollout.py --attempts k` → `python scripts/report_metrics.py --trajectories <轨迹> --baseline <对照> --pool <池>` |
 
 `run_rollout.py` 是 baseline 评测、教师采集、smoke 三者共用的入口，区别只在
