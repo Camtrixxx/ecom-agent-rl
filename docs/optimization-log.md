@@ -25,6 +25,28 @@ S4 内部的三处比较（e3 / e2 / e3-epoch2）共用同一个 world_size，�
 之后 val loss 已经与卡数无关。但 **S4 的 val loss 与已发布 SFT 的 0.39249 不可直接比**
 ——后者是在丢掉 3 条最长验证样本的口径下量的（见下）。
 
+**更要紧的一条：`sft` vs `sft_e3` 这一对不能当作「重训的 run 间方差」来读。** 卡数变了
+就等于 optimizer 的 global batch 变了——`grad_accum 4 × 5 卡 = 20 批`，而已发布的 SFT
+是 `4 × 6 = 24 批`。所以那一对同时混了「重训」和「批大小」两件事，只能当参考锚。
+S4 真正要回答的「第 3 个 epoch 值不值」完全落在 5 卡这一族内部，不受影响。
+
+**推论：R1 的两个 seed 必须用和已发布 seed 42 相同的 6 张训练卡**
+（`GPU_VLLM=1, GPUS=2,3,4,5,6,7`，即 `train_grpo.sh` 的默认值）。同样的道理：4 卡的
+global batch 是 8 批而 6 卡是 12 批，若 seed 43 用 4 卡、seed 44 用 6 卡，卡数就和 seed
+混在一起，恰好毁掉这个实验要量的 run 间方差。因此 R1 只能等 E2 让出 GPU 1-2，不能为了
+填满空闲卡而改卡数。
+
+### 排期（受上面的卡数约束）
+
+| 时间 | GPU 1-2 | GPU 3-7 |
+|---|---|---|
+| 02:35 → ~07:00 | E1（9 个检查点） | 03:09 → ~05:15 S4a `sft_e3`；→ ~06:40 S4b `sft_e2` |
+| ~07:00 → ~08:50 | E2（4 份 SFT 权重） | 空闲（不能拿去跑 R1，见上） |
+| ~08:50 → ~22:00 | R1：seed 43 然后 seed 44，各 6.56 h，占 GPU 1-7 | |
+| → ~23:30 | R1 两个 seed 各一次 500 题 k=4 评测 | |
+
+D1（不占 GPU）02:31 → ~05:35。
+
 GPU 0 上有别人的常驻服务，全程不碰。
 
 ### S1/S2/S3：train_sft.py 三处修复
@@ -54,8 +76,23 @@ GPU 0 上有别人的常驻服务，全程不碰。
 顺带补了 `steps_per_epoch == 0` 的守卫——那种情况下 while 只看 `step < total_steps`，
 会永远转下去。
 
-三处各配了回归测试，`tests/test_train_sft.py` 26 条，全套 392 条通过。为了让逻辑可测，
-`val_rounds` / `steps_in_epoch` 从 `main()` 的闭包里提到模块级。
+三处各配了回归测试，`tests/test_train_sft.py` 26 条，全套 389 passed / 3 skipped。为了让
+逻辑可测，`val_rounds` / `steps_in_epoch` 从 `main()` 的闭包里提到模块级。
+
+**冒烟**（5 卡，`--limit 48 --max-train-steps 2`）：epoch 0 量到 val 1.024，1 步后 0.798，
+末步 lr 退到 0，`metadata.json` 里 `val_curve` 两点齐全、`final` 已消失。
+
+先在 2 卡上试过一次，rank0 在 epoch-0 验证之后退出 1，当时 GPU 4 已到 79.9/80 GB。
+最可能是 2 卡下 FSDP 只把优化器状态切成两份（约 40 GB/卡，6 卡时约 13 GB）导致的 OOM，
+**但当时用了 `| tail -30`，原始异常被截掉了，这个归因是推断而非实证。** 换到 5 卡即通过，
+而 5 卡正是 S4 要用的配置，所以没有继续追这条。
+
+顺带核了两件与改动相邻的事：`evaluate()` 结束时会 `model.train()` 回去
+（`train_sft.py:376`），且 Qwen2.5 的 `attention_dropout=0.0`，所以我新加的「训练前先量
+一次」不会改变 epoch 1 的训练行为；`save()` 只 gather 一份副本转 bf16 写盘、两端各一道
+barrier，中途存不动活模型。`--save-each-epoch` 的 `if ... and not stop` 保证最后一个
+epoch 不重复存——而这一条恰好依赖 S3 的 floor 口径，ceil 时会多进一个残 epoch、多写一个
+`epoch3/`。
 
 ### 新增脚本
 
