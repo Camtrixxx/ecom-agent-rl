@@ -584,7 +584,10 @@ def main() -> None:
             record_entry = {
                 "iteration": iteration,
                 "optimizer_steps": optimizer_steps,
-                "mean_reward": group_stats.to_dict()["mean_reward"],
+                # 两个口径都写进日志。`_kept` 系统性偏低（丢的是满分组），单看它会
+                # 把变好的策略读成在退步；看性能要看 `_all` 或 `reward_types`。
+                "mean_reward_all": group_stats.to_dict()["mean_reward_all"],
+                "mean_reward_kept": group_stats.to_dict()["mean_reward_kept"],
                 "loss": round(sum(step_losses) / len(step_losses), 6) if step_losses else None,
                 "grad_norm": float(grad_norm) if step_losses else None,
                 "lr": scheduler.get_last_lr()[0],

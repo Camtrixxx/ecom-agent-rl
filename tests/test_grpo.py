@@ -134,8 +134,30 @@ class TestGroupAdvantages:
         assert stats.groups_no_variance == 1
         assert stats.groups_too_small == 1
         assert len(out) == 2
-        # 均回报只统计真正进了梯度的组
-        assert stats.to_dict()["mean_reward"] == pytest.approx((1.0 - 0.85) / 2)
+        # `_kept` 只统计真正进了梯度的组
+        assert stats.to_dict()["mean_reward_kept"] == pytest.approx((1.0 - 0.85) / 2)
+
+    def test_两个回报口径必须分开(self):
+        """`_kept` 丢掉无方差组，而被丢的恰是满分组，于是它系统性偏低。
+
+        这一条钉的是"别再合并成一个 `mean_reward`"：下面这组数据里两个口径相差
+        0.29，只看 `_kept` 会把一个大部分题都做对的策略读成平庸。
+        """
+        stats = GroupStats()
+        rows = [
+            record(1, reward=1.0), record(1, reward=1.0),      # 全对 → 无方差，被丢
+            record(2, reward=1.0), record(2, reward=1.0),      # 全对 → 无方差，被丢
+            record(3, reward=1.0), record(3, reward=-0.85),    # 有方差 → 进梯度
+        ]
+        group_advantages(rows, stats=stats)
+        payload = stats.to_dict()
+        assert stats.groups_no_variance == 2
+        # 全部有效回报：满分组照样算进来
+        assert payload["mean_reward_all"] == pytest.approx((1.0 * 5 - 0.85) / 6, abs=1e-4)
+        assert payload["mean_reward_kept"] == pytest.approx((1.0 - 0.85) / 2)
+        assert payload["mean_reward_all"] > payload["mean_reward_kept"]
+        # 旧的有歧义字段不许复活：读到它的代码拿到的是一个会误导的数。
+        assert "mean_reward" not in payload
 
 
 class TestTokenWeights:

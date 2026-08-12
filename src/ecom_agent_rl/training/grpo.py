@@ -57,7 +57,19 @@ DEFAULT_INVALID_REWARD = -1.0
 
 @dataclass
 class GroupStats:
-    """一轮采样的审计。每一项都对应一种「样本没进梯度」的原因。"""
+    """一轮采样的审计。每一项都对应一种「样本没进梯度」的原因。
+
+    回报的均值有**两个不同口径**，混用会得出相反的结论，所以这里不提供一个叫
+    `mean_reward` 的字段——它读起来像"这一轮的平均回报"，也就是性能指标，而按
+    `rewards`（只含进梯度的轨迹）算出来的那个数**不是**：无方差组会被丢掉，而被丢掉
+    的恰恰是「G 条全对」的满分组，于是它系统性偏低，并且随着策略变好越偏越多。曾经
+    只有这一个字段，实测中它在训练后期看起来像是在退步，而 `reward_types` 里的
+    `gold_purchase` 计数同期从 56.2% 涨到 71.6%。
+
+    - `mean_reward_all` —— 全部有效回报的均值。要看**性能**看这个。
+    - `mean_reward_kept` —— 只含进梯度的轨迹。它是**给优势尺度用的诊断量**，
+      配合 `groups_no_variance` 一起读才有意义。
+    """
 
     trajectories: int = 0
     unverifiable: int = 0          # reward_valid=False，剔除
@@ -66,10 +78,14 @@ class GroupStats:
     groups_too_small: int = 0      # 有效样本 < 2
     groups_no_variance: int = 0    # 全组同一个回报
     kept: int = 0                  # 最终进梯度的轨迹数
-    rewards: list[float] = field(default_factory=list)
+    rewards: list[float] = field(default_factory=list)      # 只含进梯度的轨迹
+    all_rewards: list[float] = field(default_factory=list)  # 全部有效回报，不做任何过滤
+
+    @staticmethod
+    def _mean(values: Sequence[float]) -> float | None:
+        return round(sum(values) / len(values), 4) if values else None
 
     def to_dict(self) -> dict[str, Any]:
-        rewards = self.rewards
         return {
             "trajectories": self.trajectories,
             "unverifiable": self.unverifiable,
@@ -78,7 +94,8 @@ class GroupStats:
             "groups_too_small": self.groups_too_small,
             "groups_no_variance": self.groups_no_variance,
             "kept": self.kept,
-            "mean_reward": round(sum(rewards) / len(rewards), 4) if rewards else None,
+            "mean_reward_all": self._mean(self.all_rewards),
+            "mean_reward_kept": self._mean(self.rewards),
         }
 
 
@@ -119,6 +136,8 @@ def group_advantages(
             continue
         if record.get("reward") is None:
             stats.no_terminal += 1
+        # 在任何分组过滤之前记一份：这是唯一不受「丢掉满分组」影响的口径。
+        stats.all_rewards.append(reward)
         groups[record.get("task_id")].append((record, reward))
 
     out: list[tuple[Mapping[str, Any], float]] = []
