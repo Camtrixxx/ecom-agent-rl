@@ -3,6 +3,56 @@
 这些是搭建期对 ShopSimulator v2.1 / Reward v3 的实测记录。不属于流水线主线，
 但在解读奖励曲线和设计分层报告时需要知道。
 
+## 环境代码是评分器，所以它需要一个内容锚
+
+`third_party/` 不入 git（`.gitignore:21`）、没有 patch 机制，而它里面的 engine 层
+**就是评分器本身**：`reward.py` 的终局判定、`termination.py` 的 `repeat_loop` 阈值、
+`configs/environment.json` 里 `"wrong_purchase": -0.85` 这些权重。商品数据一直有
+SHA-256 把关，计算 reward 的代码此前**没有任何把关**——改一行，本仓库全部数字静默
+失去可复现性，而且没有任何机制会报警。
+
+`EMBEDDED_SOURCE.json` 里确实记了 `upstream_base_commit` 与 `source_commit`，但它躺在
+被 gitignore 掉的树里（我们仓库没有副本），而且只是一句**声明**：没有任何东西核对文件
+是否真的等于那个 commit。
+
+现在锚记在 `data/environment/manifest.json`（在 git 里），46 个文件逐个 SHA-256 加一个
+根哈希：
+
+```
+734d7100472682f49956f4d1b21ed097cf2a2335dff77d538ef3d0f324bae613
+```
+
+**本仓库所有已发布的数字都出自这个环境版本。**
+
+```bash
+python scripts/hash_environment.py           # 校验，漂移返回 1
+python scripts/hash_environment.py --write   # 首次落锚 / 有意升级环境后重锚
+```
+
+三处设计上的判断：
+
+**记逐文件哈希，不只记根哈希。** 漂移时能直接说出是哪个文件变了。"根哈希不一致"等于
+让人从头 diff 一棵 6 千行的树，而真实改动通常只有一两个文件——多半还是 reward 权重。
+
+**排除派生产物。** `products.sqlite3` 与 `products.manifest.json` 是 `build_index.py`
+的输出，重建后字节可能不同（`index_sha256`、`sqlite_version`、`python_version` 都在
+manifest 里），纳入会让"重跑一次 setup"表现成漂移——**一个每次都喊狼来了的闸门比没有
+闸门更糟**，人会养成习惯性 `--write` 抹掉告警。它们的上游输入（商品数据 SHA-256 +
+`build_index.py` + `search.py` + `configs/`）都已被清单覆盖，排除不留缺口。同理排除
+`.venv-shopsim/`（由 `requirements.txt` 锁定）、`__pycache__/`、商品数据、`static/`、
+`*.log`。`tests/test_environment_hash.py` 里那组"排除项变动不得触发漂移"的测试钉的就是
+这一条。
+
+**堵掉唯一能绕过锚的口子。** `SHOP_ENV_CONFIG` 可以把 reward 权重指到锚范围之外的文件，
+而锚照样显示"一致"。`start_environment.sh` 现在会比对解析后的路径并拒绝启动，确属有意
+（例如 reward ablation）要显式设 `SHOPSIM_ALLOW_UNANCHORED_CONFIG=1`。
+
+闸门接在四处：`setup_environment.sh`（首次落锚，之后校验）、`start_environment.sh`（起
+服务前，服务一旦加载进内存就只有启动时检查有意义）、`train_grpo.sh` 与 `eval_grpo.sh`
+（产出数字的入口，硬闸门）。`run_rollout.py` 另把**实际扫出的**根哈希盖进
+`.summary.json` 的 `environment` 字段——一份不说明自己出自哪个环境的轨迹文件，日后无从
+判断能不能和别的文件比。盖章只记不拦：smoke 和一次性探查不该因为锚没落就跑不起来。
+
 ## Reward v3 的结构
 
 `web_agent_site/engine/reward.py`：两个硬门（price、brand）+ 四维软匹配。

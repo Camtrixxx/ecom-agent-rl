@@ -8,7 +8,7 @@
 | 模型 | Qwen2.5-7B-Instruct | 纯文本；Qwen3.5 全系列是多模态，vision tower 于本任务无用 |
 | 数据 | SFT 3,000/500，GRPO 3,000/200，评测 500 | 一律指**任务池的任务数**，不是 accepted 轨迹数；见阶段 B |
 | 训练 | 8 卡原生，不 offload | 参考实现的单卡妥协在 80G 卡上纯属速度损失 |
-| 环境 | 复制到 `third_party/`，不入 git | 上游没有 v2.1，必须带下游实现 |
+| 环境 | 复制到 `third_party/`，不入 git，但有内容锚 | 上游没有 v2.1，必须带下游实现；锚见阶段 A |
 | 参考实现 | `/data/heyuhang/shopping-grpo-longhorizon` 只读 | 唯一对照基准，不在其上改动 |
 
 硬件：8 × A800-SXM4-80GB（640G 显存），driver 570.172.08，`/data` 可用 980G。
@@ -41,6 +41,14 @@ template 一致，适配层无需改动。
 而非 20M 商品库副本；单进程的限制来自 GIL。
 
 商品数据 SHA-256：`57b10950a0064d16c81535a1d764a75879a508d250dde8a2a1787c5e6045559f`
+
+环境**代码**内容锚（46 个文件，`data/environment/manifest.json`）：
+`734d7100472682f49956f4d1b21ed097cf2a2335dff77d538ef3d0f324bae613`。补这个锚的理由是
+商品数据有把关而评分器代码没有——`third_party/` 不入 git，`reward.py` 或
+`configs/environment.json` 的权重改一行，本仓库全部数字静默失去可复现性且无人会知道。
+`python scripts/hash_environment.py` 校验，闸门接在 setup / 起服务 / 训练 / 评测四处；
+`SHOP_ENV_CONFIG` 指到锚外会被 `start_environment.sh` 拒绝（那是唯一能绕过锚的口子）。
+详见 [environment-notes.md](environment-notes.md#环境代码是评分器所以它需要一个内容锚)。
 
 ### 阶段 B — 数据层
 

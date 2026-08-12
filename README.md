@@ -149,6 +149,16 @@ Reward v3，位于 `third_party/ShopSimulator/`，不提交进 git。
 `variant_price.py`、`comparators.py`、`termination.py` 等）是上游之外的下游实现，
 随环境一并引入。
 
+**环境代码有内容锚。** 那个 engine 层就是评分器本身——`reward.py` 的终局判定、
+`configs/environment.json` 里 `"wrong_purchase": -0.85` 这些权重。商品数据一直有
+SHA-256 把关，计算 reward 的代码此前没有，于是改一行就会让本仓库全部数字静默失去可
+复现性。现在 46 个文件的逐个哈希加一个根哈希记在 `data/environment/manifest.json`（在
+git 里），`python scripts/hash_environment.py` 校验、漂移返回 1，闸门接在 setup / 起
+服务 / 训练 / 评测四处，`run_rollout.py` 还把实际根哈希盖进 `.summary.json`。
+**本仓库所有已发布的数字都出自根哈希 `734d7100…bae613` 的这个环境版本。**
+设计取舍（为什么排除派生产物、为什么记逐文件哈希）见
+[docs/environment-notes.md](docs/environment-notes.md#环境代码是评分器所以它需要一个内容锚)。
+
 **环境服务单进程被 GIL 锁死在 1 核**（~4-5 episodes/s，并发 1 即饱和），加 slot 不
 提升吞吐，扩展只能靠多进程且到 32 进程仍是线性（133 ep/s）。最优工作点是
 并发 = worker 数。完整实测见 [docs/environment-notes.md](docs/environment-notes.md)。
