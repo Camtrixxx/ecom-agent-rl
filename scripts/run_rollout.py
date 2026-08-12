@@ -28,6 +28,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import hash_environment  # noqa: E402
 
 from ecom_agent_rl.environment.pool import EnvironmentPool  # noqa: E402
 from ecom_agent_rl.rollout.agent import DEFAULT_MAX_STEPS  # noqa: E402
@@ -74,6 +77,35 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _environment_stamp() -> dict:
+    """把环境代码的根哈希盖进 summary。
+
+    为什么：一份不说明自己出自哪个环境的轨迹文件，日后无从判断能不能和别的文件比。
+    `third_party/` 不入 git，`reward.py` 改一行就会让两批轨迹不可比，而文件里没有
+    任何痕迹。盖的是**实际扫出来的**哈希（这批数据真正出自什么），另附一个是否与锚
+    一致的布尔量。
+
+    这里只记不拦：拦的位置在 `train_grpo.sh` / `eval_grpo.sh` 那些产出数字的入口，
+    而 smoke 和一次性探查不该因为锚没落就跑不起来。
+    """
+    try:
+        actual = hash_environment.scan()
+        recorded = {}
+        if hash_environment.MANIFEST_PATH.is_file():
+            recorded = json.loads(
+                hash_environment.MANIFEST_PATH.read_text(encoding="utf-8")
+            )
+        return {
+            "code_root_sha256": actual["root"],
+            "file_count": actual["file_count"],
+            "matches_anchor": bool(recorded) and recorded.get("root") == actual["root"],
+            "anchor_present": bool(recorded),
+        }
+    except (OSError, KeyError, ValueError) as exc:
+        # 盖不上章不构成丢数据的理由，但要留下"为什么盖不上"。
+        return {"code_root_sha256": None, "error": f"{type(exc).__name__}: {exc}"}
+
+
 def main() -> None:
     args = parse_args()
     logging.basicConfig(
@@ -116,6 +148,8 @@ def main() -> None:
         resume=not args.no_resume,
         max_steps=args.max_steps,
     )
+
+    summary["environment"] = _environment_stamp()
 
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     summary_path = args.out.with_suffix(".summary.json")
