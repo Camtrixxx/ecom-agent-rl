@@ -21,10 +21,19 @@ if [[ ! -f .env ]]; then
     exit 1
 fi
 
+# .env 里的端口/并发是**默认值**，不是硬性配置：调用方可以先 export 覆盖，用于和另一
+# 批 rollout 并行时错开端口段（同端口段并行会互抢 slot → env_error → 整批中止）。
+# 必须在 source 之前存下来——`set -a; source .env` 会无条件覆盖同名变量。
+_override_base_port="${SHOPSIM_BASE_PORT:-}"
+_override_workers="${SHOPSIM_WORKERS:-}"
+
 set -a
 # shellcheck disable=SC1091
 source .env
 set +a
+
+[[ -n "${_override_base_port}" ]] && SHOPSIM_BASE_PORT="${_override_base_port}"
+[[ -n "${_override_workers}" ]] && SHOPSIM_WORKERS="${_override_workers}"
 
 export LLM_BASE_URL="${TEACHER_BASE_URL:?.env 缺 TEACHER_BASE_URL}"
 export LLM_MODEL="${TEACHER_MODEL:?.env 缺 TEACHER_MODEL}"
