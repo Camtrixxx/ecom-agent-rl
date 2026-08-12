@@ -151,6 +151,40 @@ def shard(batches: list[Any], rank: int, world_size: int) -> list[Any]:
     return [batches[i * world_size + rank] for i in range(per_rank)]
 
 
+def val_rounds(batches: list[Any], rank: int, world_size: int) -> list[tuple[Any, float]]:
+    """验证集的分卡方案：返回 [(批, 权重)]，长度对所有 rank 相同。
+
+    和 shard() 的区别是**不丢样本**。shard() 截到等长是为了让各 rank 的 forward 次数
+    相同（否则 FSDP 会卡在 all-gather 上），代价是丢掉尾部 len%world 批；训练侧无所谓
+    （每 epoch 重新 shuffle），val 侧却致命——批是按长度排序的且不 shuffle，被丢的
+    永远是最长的那几条，而且丢哪些取决于卡数，于是 val loss 不再跨卡数可比。
+
+    这里改成 batches[rank::world]，再用**权重 0 的重复批**把各 rank 补到同样的轮数：
+    forward 次数依然恒等，但补出来的那几次不进分子分母。于是每条样本恰好计一次，
+    结果与 world_size 无关。
+    """
+    if world_size <= 0:
+        raise ValueError(f"world_size 必须为正，得到 {world_size}")
+    if len(batches) < world_size:
+        raise ValueError(
+            f"批数 {len(batches)} 少于进程数 {world_size}，无法给每个 rank 分到占位批"
+        )
+    mine = batches[rank::world_size]
+    rounds = math.ceil(len(batches) / world_size)
+    return [(mine[i], 1.0) if i < len(mine) else (mine[0], 0.0) for i in range(rounds)]
+
+
+def steps_in_epoch(per_rank: int, grad_accum: int) -> int:
+    """一个 epoch 内实际会走的 optimizer 步数。
+
+    必须与训练循环 `range(0, per_rank - grad_accum + 1, grad_accum)` 同口径——那个
+    循环只走**完整**的 grad_accum 组，所以是 floor 而不是 ceil。用 ceil 会让
+    total_steps 大于所有 epoch 能走的步数之和，while 于是多跑一个残 epoch 去补齐，
+    余弦调度在残 epoch 中途才退到 0。
+    """
+    return per_rank // grad_accum
+
+
 def main() -> None:
     args = parse_args()
 
@@ -215,7 +249,20 @@ def main() -> None:
             f"批数 {len(batches)} 少于进程数 {accelerator.num_processes}；"
             "减小 --tokens-per-batch 或加样本"
         )
-    steps_per_epoch = max(1, math.ceil(per_rank / args.grad_accum))
+    # floor 而不是 ceil：下面的训练循环是
+    #     range(0, len(rank_batches) - grad_accum + 1, grad_accum)
+    # 也就是**只走完整的 grad_accum 组**，实际步数恒为 per_rank // grad_accum。用 ceil
+    # 会让 total_steps 比所有 epoch 加起来能走的步数还大，于是 while 多跑一个残 epoch
+    # 去补齐，而余弦调度在这个残 epoch 中途才走到 0（--save-each-epoch 还会多写一个
+    # epoch 目录）。上次没暴露纯属整除的巧合：6 卡 per_rank=108、7 卡 92，都被 4 整除；
+    # 8 卡 per_rank=81 就会踩——ceil 21 vs floor 20，total_steps 63 而 3 个 epoch 只有 60 步。
+    steps_per_epoch = steps_in_epoch(per_rank, args.grad_accum)
+    if steps_per_epoch == 0:
+        # 训练循环一步都走不出来，而 while 只看 step < total_steps —— 会永远转下去。
+        raise SystemExit(
+            f"每卡 {per_rank} 批不足一个 grad_accum={args.grad_accum} 组，一步也走不了；"
+            "减小 --grad-accum 或 --tokens-per-batch"
+        )
     total_steps = max(1, int(steps_per_epoch * args.epochs))
     if args.max_train_steps:
         total_steps = min(total_steps, args.max_train_steps)
@@ -286,18 +333,45 @@ def main() -> None:
 
     @torch.no_grad()
     def evaluate() -> float | None:
+        """val loss。每条验证样本恰好计一次，结果与 world_size 无关。
+
+        这里**不能**用 shard()。它为了对齐集合通信把各 rank 截到等长，丢掉尾部
+        len(batches) % world_size 批。训练侧丢一点无所谓——每个 epoch 重新 shuffle，
+        长期看每条都会被采到——但 val 侧不是：token_budget_batches 先按长度排序，
+        val 又从不 shuffle，所以被丢的永远是排序后最靠后的那几批，也就是**最长的
+        样本**，而且每个 epoch 丢的都是同一批。
+
+        后果有二。一是偏：已公布的 0.39249 实际是 295 条上算的，缺的 3 条恰是最长
+        的回合，而长回合是这个任务的主体。二是不可比：丢哪些取决于卡数（6 卡丢 3、
+        7 卡丢 6、8 卡丢 7），两次不同卡数的运行是在两个不同的验证集上算 val loss，
+        而没有任何东西会提示这件事。在「第 3 个 epoch 只降 0.0032」这种量级的比较上，
+        验证集悄悄换掉 1-2% 的最长样本是不能接受的。
+
+        改法：给每个 rank 发 batches[rank::world]，轮数取全局一致的
+        ceil(len(batches)/world)。轮数不够的 rank 拿自己的第一批再跑一次但**权重 0**
+        ——只为凑齐 all-reduce 的对端，不进分子也不进分母。各 rank 的 forward 次数
+        因此恒等，FSDP 不会卡在 all-gather 上。
+        """
         if not val_examples:
             return None
+        all_batches = token_budget_batches(val_examples, args.tokens_per_batch)
+        if not all_batches:
+            return None
+        # 每个 rank 至少要有一批才能拿来当零权重占位。只有「批数 < 卡数」时才不成立，
+        # 那时 val 本身也没有意义了——明确报错好过静默算出一个错的数。
+        try:
+            rounds = val_rounds(
+                all_batches, accelerator.process_index, accelerator.num_processes
+            )
+        except ValueError as exc:
+            raise SystemExit(f"验证集分卡失败：{exc}；减小 --tokens-per-batch 或增加验证样本")
         model.eval()
-        val_batches = shard(
-            token_budget_batches(val_examples, args.tokens_per_batch),
-            accelerator.process_index,
-            accelerator.num_processes,
-        )
         total = torch.zeros(2, device=accelerator.device)
-        for indices in val_batches:
+        for indices, weight in rounds:
             loss, tokens = forward_loss(indices, val_examples)
-            total += torch.tensor([loss.item(), tokens], device=accelerator.device)
+            total += torch.tensor(
+                [loss.item() * weight, tokens * weight], device=accelerator.device
+            )
         total = accelerator.reduce(total, reduction="sum")
         model.train()
         return (total[0] / total[1]).item() if total[1] > 0 else None
@@ -308,6 +382,25 @@ def main() -> None:
     stop = False
     epoch = 0
     history: list[dict[str, Any]] = []
+
+    def emit(record: dict[str, Any]) -> None:
+        """进 history，同时落盘。
+
+        val 记录以前只 append 不写盘（写盘发生在 log_every 那个分支里，val 走不到），
+        于是 `grep val_loss train_log.jsonl` 是空的，三个 val 数只存在于人读日志里。
+        要做 2 vs 3 epoch 的对比、要画 loss 曲线，第一步却是 grep 人读日志，这不对。
+        """
+        history.append(record)
+        log(json.dumps(record, ensure_ascii=False))
+        if main_process:
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    # 训练前先量一次，给 val 曲线一个起点（epoch 0）。成本约 1-2 min，换来的是
+    # 「第 1 个 epoch 降了多少」这个以前根本没有的数——原来的曲线从 epoch 1 才开始。
+    baseline_val = evaluate()
+    if baseline_val is not None:
+        emit({"step": 0, "epoch": 0, "val_loss": round(baseline_val, 5)})
 
     while not stop and step < total_steps:
         rank_batches = shard(
@@ -358,11 +451,7 @@ def main() -> None:
                     "tokens": int(step_tokens),
                     "elapsed": round(time.time() - started, 1),
                 }
-                history.append(record)
-                log(json.dumps(record, ensure_ascii=False))
-                if main_process:
-                    with log_path.open("a", encoding="utf-8") as handle:
-                        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                emit(record)
 
             if step >= total_steps:
                 stop = True
@@ -371,8 +460,7 @@ def main() -> None:
         epoch += 1
         val_loss = evaluate()
         if val_loss is not None:
-            log(f"epoch {epoch} 验证 loss {val_loss:.5f}")
-            history.append({"step": step, "epoch": epoch, "val_loss": round(val_loss, 5)})
+            emit({"step": step, "epoch": epoch, "val_loss": round(val_loss, 5)})
         if args.save_each_epoch and not stop:
             save(accelerator, model, tokenizer, args.out_dir / f"epoch{epoch}", log)
 
@@ -403,7 +491,10 @@ def main() -> None:
             },
             "steps": step,
             "elapsed_seconds": round(time.time() - started, 1),
-            "final": history[-1] if history else None,
+            # 拆成两项而不是一个 `final`：原来 final 取 history[-1]，而最后一条恰好
+            # 总是 val 记录，于是最后一步的 train loss、lr、grad_norm 全被顶掉了。
+            "final_train": next((r for r in reversed(history) if "loss" in r), None),
+            "val_curve": [r for r in history if "val_loss" in r],
         }
         (args.out_dir / "metadata.json").write_text(
             json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
