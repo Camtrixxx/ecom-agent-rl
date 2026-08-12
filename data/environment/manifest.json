@@ -1,0 +1,89 @@
+{
+  "algorithm": "sha256-over-sorted-path-and-file-digests-v1",
+  "embedded_source": {
+    "embedded_scope": "current runtime, tests, templates, static assets, and compressed product data",
+    "excluded": [
+      "Git metadata",
+      "virtual environments",
+      "generated indexes",
+      "decompressed product data",
+      "runtime logs and caches",
+      "historical evaluation outputs"
+    ],
+    "source_commit": "9ecba272963960ab4a10e1a781bd05cd7634ce20",
+    "upstream_base_commit": "51bb26012cee31aea7ac26177c5ffe807026ac07",
+    "upstream_repository": "https://github.com/ShopAgent-Team/ShopSimulator"
+  },
+  "file_count": 46,
+  "files": {
+    "EMBEDDED_SOURCE.json": "ee67ca5771ce3419c631413b84fbf5200243dfb44a7886224f4492901e89b83b",
+    "shop_env/configs/brand_aliases.json": "a53d201aaa8d24e1624b24d5ced4e86d54fd57fe2f69ffcf945a165cff86549b",
+    "shop_env/configs/environment.json": "b24619cde4fc3a0f07f9043d14695a6602201b57307e7a59785bca900fd3acb8",
+    "shop_env/requirements.txt": "8a72149ea2b657f10c7b7c9faf7fe83ee4f412384ab08a5b0c79505669275129",
+    "shop_env/scripts/__init__.py": "be43d88a62f811abcebea1353a86516a10a20215336e6aa914399454e606e898",
+    "shop_env/scripts/build_index.py": "8ba59119021e10661a8acd342fa99aee0bcd9e03d11c797b9b291bec5cb7b031",
+    "shop_env/shop_env/pack_api.py": "46998442f25948b420cd4d467400c420b39e1e8e4e89a2ae197bf8fe56d8bcea",
+    "shop_env/shop_env/request_api.py": "22c38e45dcb3f455e8db64a09397281b0b9c81157bb828ed9628d665b5900c99",
+    "shop_env/shop_env/shop_agent.py": "444bd5b70870839b424a64f822fed3f77a3f8c3bbe66377d436e105917045e6d",
+    "shop_env/shop_env/slot_lease_pool.py": "5be40275eebbed6735196a1dea4581ce707558e247d23d0de4d98907772a0420",
+    "shop_env/start.sh": "867655a85cede2462ab8993eb675be2e451ff4b1c8414d6c080bef033c378407",
+    "shop_env/tests/test_config.py": "4acbdd4b80ce765f4c3a85beda5157936b434a50dae57ec3360296efb24426ad",
+    "shop_env/tests/test_constraints.py": "6dc3d30fcfcba258e18951a91fee3b5e372717837615875f26962934d11f7e30",
+    "shop_env/tests/test_observation.py": "1f4c2cfc7a6beb7d28b5c5310ec6e6669b7025d3f390f81e91a0a1092c4ea025",
+    "shop_env/tests/test_reward.py": "f71be181365025bfcc53941da43f079361edcc7b455970d7130015124b407f27",
+    "shop_env/tests/test_search.py": "e1e6104b4cfbf4371ab497a287c0f30647bebde3fb7727726545b2e8a2474898",
+    "shop_env/tests/test_slot_lease_contract.py": "6e6cf569cfa8ff0948d227df22b2783742c4ef44b528e0dd3e479a47a15a23cf",
+    "shop_env/tests/test_termination.py": "1e8a2016bafc2bfd687c0e3d23097f80bb97336ddb3b2a9c1ea4122a1cb403d5",
+    "shop_env/web_agent_site/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "shop_env/web_agent_site/app.py": "1de6d8c6077db7044d97bfb918d4dd98130762047412100599f80d7114c89784",
+    "shop_env/web_agent_site/engine/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "shop_env/web_agent_site/engine/comparators.py": "e80e4c40ab95244ac19822de967f14aa9fa06fe054269cc788b5486b56c1fdfc",
+    "shop_env/web_agent_site/engine/config.py": "f324078654a718ac3bf40135bda715672d91ce69e6e81c3cd3946029162b7644",
+    "shop_env/web_agent_site/engine/constraints.py": "b4155708dd7006ae4afe42c535ee4d2abe138585fa79ce4631faa03370dc0ae5",
+    "shop_env/web_agent_site/engine/engine.py": "130e0261c5c589ac133f1562f6d718736cda44abe54e2151867f5b17f136a086",
+    "shop_env/web_agent_site/engine/goal.py": "e691221ca54d500d08eb663295751e511cc0ba6abea416dca680db41e4d80352",
+    "shop_env/web_agent_site/engine/normalize.py": "629127a57aa978707f34006b6f242fff156d8537e489bf89b06b7c7a47395db3",
+    "shop_env/web_agent_site/engine/observation.py": "adabdf0109b8a0f592148c098e44065913ce6c699230047239d8809f412bf998",
+    "shop_env/web_agent_site/engine/product_id.py": "724da59fee78d09a54d6175533bfbf519caaecf1e94b282b2739057a3975dd4e",
+    "shop_env/web_agent_site/engine/reward.py": "ea692a5bd91c95dc086925372667e74328c0f86b3d6f1c67df3c59883df8990e",
+    "shop_env/web_agent_site/engine/reward_features.py": "3f416bf5d32ce2cd57dd10b0ab0939a5869c96ca67dab17ad3ba243584373c30",
+    "shop_env/web_agent_site/engine/search.py": "05ed68cb09e2f3640a6504d2b0265408149c02f7b9c191c1d138635a2e7e1f6e",
+    "shop_env/web_agent_site/engine/termination.py": "c46e87e0325d486c18bac740e4c829ac7df883c355cc7b881bf2b315f45c7647",
+    "shop_env/web_agent_site/engine/variant_price.py": "077e5707f0a5f212923af562e212258a4a598891b7648aec236082338913a364",
+    "shop_env/web_agent_site/envs/__init__.py": "d8c6d31d3b31e5d55ea332cb1451a4be7fac59f89bc3c5b9522d75627d0dc0b6",
+    "shop_env/web_agent_site/envs/web_agent_site_env.py": "999bb76ec291565d7a6c876e3c97c864b4d45784e0a508f1c56b27ff141ceb1a",
+    "shop_env/web_agent_site/envs/web_agent_text_env.py": "d6db15f282849847a364d8d36af0eed113c1c97184a1ded98eb1fd29dab577d1",
+    "shop_env/web_agent_site/templates/attributes_page.html": "ca6ee6144bfd05480b4cd1366c3cae244cc3a4de5ed407db11b7b3175bf970bc",
+    "shop_env/web_agent_site/templates/description_page.html": "2c90e9444b3380857a8c409ce2b37cbf6790ddedbb6dbb140d644ca8828b223d",
+    "shop_env/web_agent_site/templates/done_page.html": "3af78333a311ea3476407a451f6290a67f92f7d5482ec9efe909ae16bcf862d8",
+    "shop_env/web_agent_site/templates/features_page.html": "770277dd979b4e44b6a5a1cdc0a2d255db1c3ab2a2e4c350beaacad87c3cc356",
+    "shop_env/web_agent_site/templates/item_page.html": "312e8371c139a54e541ff548b449942a0ff627004e4b2ee329283a5cb28c5eea",
+    "shop_env/web_agent_site/templates/results_page.html": "6853f291a2dd3f071c513ab95c09ca4f550bb910845f43f7044dddaa4d0c5a52",
+    "shop_env/web_agent_site/templates/review_page.html": "1b51c2ce5325c9973613b61639be296d72cf69267603c98083c913ea8f34dc7e",
+    "shop_env/web_agent_site/templates/search_page.html": "71efbe52bc6dadff2449163340d7629a8daa4629267a834e5d0496971fa9e454",
+    "shop_env/web_agent_site/utils.py": "7f0bb9ca2bd4710afa13d290b786ac041aee7dadd6c055360dab9620521074f4"
+  },
+  "root": "734d7100472682f49956f4d1b21ed097cf2a2335dff77d538ef3d0f324bae613",
+  "scope": {
+    "excluded_dir_names": [
+      "__pycache__"
+    ],
+    "excluded_prefixes": [
+      ".venv-shopsim/",
+      "shop_env/data/",
+      "shop_env/search_engine/",
+      "shop_env/web_agent_site/static/"
+    ],
+    "excluded_suffixes": [
+      ".log"
+    ],
+    "included_suffixes": [
+      ".py",
+      ".json",
+      ".sh",
+      ".html",
+      ".txt"
+    ]
+  },
+  "total_bytes": 242167
+}

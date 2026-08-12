@@ -24,7 +24,16 @@ dist/
 /outputs/
 /checkpoints/
 /models/
-/data/
+/data/*
 /swanlog/
 /wandb/
 /logs/
+
+# 例外：环境内容锚。它整个存在的意义就是「记在我们自己的 git 里」——环境树本身被
+# 上面的 /third_party/ 忽略掉了，锚不入库就没有任何东西证明代码没变过。
+#
+# 写成 /data/* 而不是 /data/ 是必需的：git 不会进入被忽略的**目录**，目录级忽略
+# 之下的否定规则根本不生效。每一层都要显式放行再重新忽略其内容。
+!/data/environment/
+/data/environment/*
+!/data/environment/manifest.json
