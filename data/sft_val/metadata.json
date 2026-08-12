@@ -1,0 +1,71 @@
+{
+  "observation_version": "shopping-observation-v2",
+  "outputs": {
+    "train": {
+      "path": "data/sft_val/train.jsonl",
+      "samples": 299,
+      "sha256": "ce12fa902058eb18221616b3a8859de6693c9ee31d18ecd5f1032a510fd2abec"
+    },
+    "verdicts": {
+      "path": "data/sft_val/verdicts.jsonl",
+      "sha256": "bb70734a3bd2ea1037f57f235123f080a205e86c246371a78a3e1c6c82c88e46"
+    }
+  },
+  "provenance": {
+    "held_out_pool": null,
+    "held_out_tasks": 0,
+    "system_prompt_sha256": "d2a1770ef0f09c9636c95b3f8ec124c76833ef87234aa329baac709b891eb91f",
+    "tool_schemas_sha256": "722b12f54a1352ea2b304941a4ca7758eea992af96cd146d0cbefb0495e9c970",
+    "trajectories": [
+      "outputs/teacher/sft_val.jsonl"
+    ],
+    "trajectories_sha256": {
+      "outputs/teacher/sft_val.jsonl": "cb2052276c8c69cd50548b0b4be968f08c4447668070c9e68293edc889a001bc"
+    }
+  },
+  "report": {
+    "acceptance_rate": 0.598,
+    "accepted": 299,
+    "duplicate_tasks_excluded": 0,
+    "held_out_excluded": 0,
+    "reason_counts": {
+      "dropped_tool_calls": 16,
+      "has_error": 18,
+      "missing_buy": 141,
+      "no_reward_type": 48,
+      "rejections:4": 9,
+      "rejections:5": 1,
+      "reward_not_valid": 50,
+      "reward_type_not_accepted:early_abstain": 1,
+      "reward_type_not_accepted:max_steps": 16,
+      "reward_type_not_accepted:partial_alternative_purchase": 32,
+      "reward_type_not_accepted:repeat_loop": 76,
+      "reward_type_not_accepted:reward_unverifiable": 2,
+      "reward_type_not_accepted:wrong_purchase": 17,
+      "status_not_done:empty_response": 18,
+      "status_not_done:no_tool_call": 30,
+      "trajectory_not_done": 48
+    },
+    "reward_types": {
+      "early_abstain": 1,
+      "gold_purchase": 307,
+      "max_steps": 16,
+      "no_terminal:empty_response": 18,
+      "no_terminal:no_tool_call": 30,
+      "partial_alternative_purchase": 32,
+      "repeat_loop": 76,
+      "reward_unverifiable": 2,
+      "valid_alternative_purchase": 1,
+      "wrong_purchase": 17
+    },
+    "total": 500
+  },
+  "schema_version": "ecom-sft-dataset-v1",
+  "selection": {
+    "accept_types": [
+      "gold_purchase",
+      "valid_alternative_purchase"
+    ],
+    "max_rejections": 3
+  }
+}

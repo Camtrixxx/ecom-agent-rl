@@ -37,3 +37,16 @@ dist/
 !/data/environment/
 /data/environment/*
 !/data/environment/manifest.json
+
+# 例外：血缘记录（provenance）是 provenance，不是生成物。数据本身很大且可由脚本
+# 重建，但「这批数据是什么、出自哪里、sha256 是多少」重建不出来——文档里到处引用
+# 这些 metadata.json，而它们此前一个都不在 git 里，等于血缘随机器消失。
+!/data/task_pools/
+/data/task_pools/*
+!/data/task_pools/metadata.json
+!/data/sft/
+/data/sft/*
+!/data/sft/metadata.json
+!/data/sft_val/
+/data/sft_val/*
+!/data/sft_val/metadata.json

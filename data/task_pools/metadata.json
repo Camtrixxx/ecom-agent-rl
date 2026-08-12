@@ -1,0 +1,139 @@
+{
+  "environment": "shopsimulator-environment-v2.1",
+  "provenance": {
+    "disjoint": true,
+    "note": "task_id 即商品下标；已校验每商品恰好 1 条 instruction，无商品级泄漏",
+    "products": "third_party/ShopSimulator/shop_env/data/fine_items_eval_train_all.json.gz",
+    "products_count": 23421,
+    "products_sha256_expected": "57b10950a0064d16c81535a1d764a75879a508d250dde8a2a1787c5e6045559f",
+    "seed": 20260810,
+    "stratified_by": [
+      "domain_en_short",
+      "attribute_count_bucket"
+    ]
+  },
+  "reward": "shopsimulator-reward-v3",
+  "schema_version": "ecom-task-pool-v1",
+  "splits": {
+    "evaluation": {
+      "distribution": {
+        "difficulty": {
+          "1-2": 91,
+          "3-4": 185,
+          "5-7": 178,
+          "8+": 46
+        },
+        "domain": {
+          "Appliances": 56,
+          "Beauty": 65,
+          "Clothing": 77,
+          "Food": 27,
+          "Home": 88,
+          "Kids": 21,
+          "Leisure": 69,
+          "Sports": 34,
+          "Supplies": 63
+        }
+      },
+      "path": "data/task_pools/evaluation.jsonl",
+      "sha256": "2b7b0616b0759df3a186661cc42781d7becf44c881976769fe448cd0bd88b7d0",
+      "tasks": 500
+    },
+    "grpo_train": {
+      "distribution": {
+        "difficulty": {
+          "1-2": 530,
+          "3-4": 1098,
+          "5-7": 1080,
+          "8+": 292
+        },
+        "domain": {
+          "Appliances": 328,
+          "Beauty": 396,
+          "Clothing": 452,
+          "Food": 160,
+          "Home": 529,
+          "Kids": 138,
+          "Leisure": 415,
+          "Sports": 209,
+          "Supplies": 373
+        }
+      },
+      "path": "data/task_pools/grpo_train.jsonl",
+      "sha256": "55e6bbcb6fed76d3c855f1ba6267082d2411d90fe719e2c5ce482ade9a744ad7",
+      "tasks": 3000
+    },
+    "grpo_val": {
+      "distribution": {
+        "difficulty": {
+          "1-2": 33,
+          "3-4": 73,
+          "5-7": 78,
+          "8+": 16
+        },
+        "domain": {
+          "Appliances": 21,
+          "Beauty": 25,
+          "Clothing": 32,
+          "Food": 10,
+          "Home": 35,
+          "Kids": 8,
+          "Leisure": 30,
+          "Sports": 13,
+          "Supplies": 26
+        }
+      },
+      "path": "data/task_pools/grpo_val.jsonl",
+      "sha256": "95431ffce63bc1b54f4e62a0eefde6ba0f35ecc877ec5bbe4c905bf6f48f9ddd",
+      "tasks": 200
+    },
+    "sft_train": {
+      "distribution": {
+        "difficulty": {
+          "1-2": 530,
+          "3-4": 1100,
+          "5-7": 1078,
+          "8+": 292
+        },
+        "domain": {
+          "Appliances": 331,
+          "Beauty": 397,
+          "Clothing": 449,
+          "Food": 160,
+          "Home": 527,
+          "Kids": 140,
+          "Leisure": 417,
+          "Sports": 207,
+          "Supplies": 372
+        }
+      },
+      "path": "data/task_pools/sft_train.jsonl",
+      "sha256": "dcc0b5ca5f00f25f9d038d687729ca3310279027938250fd49d7ca5694596523",
+      "tasks": 3000
+    },
+    "sft_val": {
+      "distribution": {
+        "difficulty": {
+          "1-2": 89,
+          "3-4": 181,
+          "5-7": 184,
+          "8+": 46
+        },
+        "domain": {
+          "Appliances": 57,
+          "Beauty": 66,
+          "Clothing": 75,
+          "Food": 25,
+          "Home": 88,
+          "Kids": 21,
+          "Leisure": 72,
+          "Sports": 32,
+          "Supplies": 64
+        }
+      },
+      "path": "data/task_pools/sft_val.jsonl",
+      "sha256": "9b72eb562f481df4bb399292a3476766d0cee81fd54071d4b71e97c32398f707",
+      "tasks": 500
+    }
+  }
+}

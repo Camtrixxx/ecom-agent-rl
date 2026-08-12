@@ -1,0 +1,77 @@
+{
+  "observation_version": "shopping-observation-v2",
+  "outputs": {
+    "train": {
+      "path": "data/sft/train.jsonl",
+      "samples": 1781,
+      "sha256": "f9ecb4ea4c98ffb1d67f63c45996287e83771f876c4551669c12f50fbfe7cfdd"
+    },
+    "verdicts": {
+      "path": "data/sft/verdicts.jsonl",
+      "sha256": "5741419803ebd25f13358ce251e54977b4a8bc15315101a229763e4df0e8f302"
+    }
+  },
+  "provenance": {
+    "held_out_pool": "data/task_pools/sft_val.jsonl",
+    "held_out_tasks": 500,
+    "system_prompt_sha256": "d2a1770ef0f09c9636c95b3f8ec124c76833ef87234aa329baac709b891eb91f",
+    "tool_schemas_sha256": "722b12f54a1352ea2b304941a4ca7758eea992af96cd146d0cbefb0495e9c970",
+    "trajectories": [
+      "outputs/teacher/sft_train.jsonl"
+    ],
+    "trajectories_sha256": {
+      "outputs/teacher/sft_train.jsonl": "d85467a721502a58c27732cc75cd0054f12fb90de6db7924e26516a5dd1923ae"
+    }
+  },
+  "report": {
+    "acceptance_rate": 0.5937,
+    "accepted": 1781,
+    "duplicate_tasks_excluded": 0,
+    "held_out_excluded": 0,
+    "reason_counts": {
+      "dropped_tool_calls": 80,
+      "has_error": 93,
+      "missing_buy": 861,
+      "no_reward_type": 234,
+      "rejections:10": 2,
+      "rejections:4": 72,
+      "rejections:5": 19,
+      "rejections:6": 3,
+      "rejections:7": 4,
+      "rejections:8": 1,
+      "reward_not_valid": 252,
+      "reward_type_not_accepted:early_abstain": 5,
+      "reward_type_not_accepted:max_steps": 144,
+      "reward_type_not_accepted:partial_alternative_purchase": 178,
+      "reward_type_not_accepted:repeat_loop": 478,
+      "reward_type_not_accepted:reward_unverifiable": 18,
+      "reward_type_not_accepted:wrong_purchase": 88,
+      "status_not_done:empty_response": 92,
+      "status_not_done:no_tool_call": 141,
+      "status_not_done:rejection_limit": 1,
+      "trajectory_not_done": 234
+    },
+    "reward_types": {
+      "early_abstain": 5,
+      "gold_purchase": 1850,
+      "max_steps": 144,
+      "no_terminal:empty_response": 92,
+      "no_terminal:no_tool_call": 141,
+      "no_terminal:rejection_limit": 1,
+      "partial_alternative_purchase": 178,
+      "repeat_loop": 478,
+      "reward_unverifiable": 18,
+      "valid_alternative_purchase": 5,
+      "wrong_purchase": 88
+    },
+    "total": 3000
+  },
+  "schema_version": "ecom-sft-dataset-v1",
+  "selection": {
+    "accept_types": [
+      "gold_purchase",
+      "valid_alternative_purchase"
+    ],
+    "max_rejections": 3
+  }
+}
