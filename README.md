@@ -21,7 +21,7 @@ python scripts/check_environment.py        # 可选：量环境池还剩多少 s
 | Baseline | 测量原始 Qwen2.5-7B-Instruct 的工具使用能力 | `python scripts/run_rollout.py --pool data/task_pools/evaluation.jsonl --out outputs/rollouts/baseline.jsonl` |
 | SFT | 从教师轨迹学习合法、完整的购物行为 | `bash scripts/collect_teacher.sh` → `python scripts/build_sft_dataset.py` → `bash scripts/train_sft.sh` |
 | GRPO | 在真实环境 Rollout 中优化 Reward v3 | `bash scripts/train_grpo.sh` |
-| Evaluation | 在同一批留出任务上公平比较模型 | `run_rollout.py --attempts k` → `python scripts/report_metrics.py --trajectories <轨迹> --baseline <对照> --pool <池>` |
+| Evaluation | 在同一批留出任务上公平比较模型 | `run_rollout.py --attempts k` → `python scripts/report_metrics.py --trajectories <轨迹> --baseline <对照> --pool <池>`；GRPO 三方比较一键跑 `bash scripts/eval_grpo.sh` |
 
 `run_rollout.py` 是 baseline 评测、教师采集、smoke 三者共用的入口，区别只在
 `--pool` / `--out` / `--base-url`；被中断后重跑同一条命令即按 `(task_id, attempt)`
@@ -60,6 +60,10 @@ WebShop 式基础壳子；Environment v2.1 与 Reward v3 的 engine 层（约 3,
 `experiments/comparison.md` 自述不估计采样方差，导致 SFT 60.5% 与 GRPO 62.0%
 之间 3 道题的差距无法与噪声区分。本项目要求多次采样与置信区间。
 
+这条改动事后被量化了：拿 SFT 自己的 2,000 条按 `attempt` 分半做配对比较（真实差值
+为 0），量出的噪声半宽在 k=1 时是 **±4.1 pp**——参考实现那 1.5 个点整个落在里面。
+本项目 k=4 的半宽是 ±1.8~2.0 pp，实测 GRPO 增益 +7.4 pp，稳稳在分辨率之上。
+
 换用 Qwen2.5 系列的原因：Qwen3.5 全系列均为多模态
 （`Qwen3_5ForConditionalGeneration`，带 `vision_config`），而本任务是纯文本，
 vision tower 只会占用显存与参数量。Qwen2.5-7B-Instruct 是纯文本模型，中文原生，
@@ -70,5 +74,14 @@ vision tower 只会占用显存与参数量。Qwen2.5-7B-Instruct 是纯文本�
 
 ## 状态
 
-搭建中。详见 [docs/roadmap.md](docs/roadmap.md)，环境侧观察记录见
+四阶段主线已跑通。留出集 500 题 × 4 次采样，按 task_id 配对比较：
+
+| | baseline | SFT | GRPO |
+|---|---|---|---|
+| 成功率 | 0.0745 | 0.6061 | **0.6838** |
+
+配对差值 SFT vs baseline **+53.13 pp**，GRPO vs SFT **+7.41 pp [+5.40, +9.51]**。
+
+详见 [docs/roadmap.md](docs/roadmap.md)；评测的判定规则在开跑前写死于
+[docs/eval-preregistration.md](docs/eval-preregistration.md)；环境侧观察记录见
 [docs/environment-notes.md](docs/environment-notes.md)。
