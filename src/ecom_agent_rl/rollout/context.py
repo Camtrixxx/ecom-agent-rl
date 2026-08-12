@@ -107,9 +107,14 @@ def _query_of(group: Sequence[Mapping[str, Any]]) -> str | None:
             name = str(function.get("name") or "")
             raw = function.get("arguments")
             try:
-                args = raw if isinstance(raw, Mapping) else json.loads(raw or "{}")
+                parsed = raw if isinstance(raw, Mapping) else json.loads(raw or "{}")
             except (TypeError, ValueError):
-                args = {}
+                parsed = {}
+            # 必须检查**结果**是不是 Mapping，不能只检查输入：`"B0CXYZ"` 这种被引号包住
+            # 的裸标量是合法 JSON，`json.loads` 原样返回一个 str，上面那道 isinstance
+            # 守卫完全绕过去，到 `.get` 才炸。而这里炸掉的代价极不对称——压缩只是在给
+            # 摘要凑一行字，却会让整批 192 个回合的采样中止。
+            args = parsed if isinstance(parsed, Mapping) else {}
             if name == "search_products":
                 query = str(args.get("query") or "").strip()
                 return query or None

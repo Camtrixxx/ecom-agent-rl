@@ -78,6 +78,30 @@ def test_the_input_is_never_mutated():
     assert json.dumps(messages, ensure_ascii=False) == before
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    ['"B0CXYZ"', "123", "[1, 2]", "null", "true", "不是 JSON", "", None, 7],
+    ids=["quoted-str", "int", "array", "null", "bool", "garbage", "empty", "none", "raw-int"],
+)
+def test_compaction_survives_arguments_that_are_not_objects(arguments):
+    """模型发出的 `arguments` 不是对象时，压缩必须照常工作而不是抛异常。
+
+    `"B0CXYZ"` 这种被引号包住的裸标量是**合法 JSON**，`json.loads` 原样返回 str，
+    只检查输入类型的守卫会被绕过去，到 `.get` 才炸。代价极不对称：压缩只是在给摘要
+    凑一行字，炸掉却会中止整批 192 个回合的采样。实跑第 20 轮上真的踩到了。
+    """
+    # 观测要够长：非对象的 arguments 普遍比正常的 JSON 短，用默认长度的对话会缩到
+    # 预算以下，压缩根本不触发，测试就变成空跑了。
+    messages = conversation(20, "页面内容" * 30)
+    for message in messages:
+        for c in message.get("tool_calls") or []:
+            c["function"]["arguments"] = arguments
+
+    out, stats = compact_messages(messages, words, 200)
+    assert stats.dropped_groups > 0
+    assert any(SUMMARY_MARKER in str(m.get("content") or "") for m in out)
+
+
 # --- 结构合法性 -----------------------------------------------------------
 
 
