@@ -32,6 +32,10 @@ wait_gone "eval_checkpoints.sh" "E1"
 # 同端口段并行两个客户端池会互抢租约 → env_error → 整批中止。所以必须等它退出。
 wait_gone "topup_k8.sh" "E1 的 k=8 补采"
 wait_gone "run_s4.sh" "S4"
+# S4 训 sft_e2 时 GPU1-2 空着，E2 的另外三份权重已就绪，所以提前起了一个
+# eval_sft_variants.sh 把它们先评掉（脚本自己会跳过缺失和已完成的）。绝不能和下面这次
+# 并行——同端口段两个客户端池互抢租约 → env_error → 整批中止。
+wait_gone "eval_sft_variants.sh" "E2 预跑"
 
 missing=0
 for d in outputs/models/sft_e3 outputs/models/sft_e2 outputs/models/sft_e3/epoch2; do
