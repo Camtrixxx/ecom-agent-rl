@@ -24,6 +24,10 @@ if [[ -x "${ROOT}/.venv/bin/accelerate" ]]; then
   export PATH="${ROOT}/.venv/bin:${PATH}"
 fi
 
+# 环境代码的内容锚：reward 变了而没人注意，这一轮训练就和之前的实验不可比，而日志里
+# 看不出任何异常。6.5 小时的训练值得先花 0.2 秒校一下。
+python3 "${ROOT}/scripts/hash_environment.py" --quiet
+
 GPU_VLLM="${GPU_VLLM:-1}"
 GPUS="${GPUS:-2,3,4,5,6,7}"
 NUM_GPUS="$(awk -F, '{print NF}' <<<"${GPUS}")"

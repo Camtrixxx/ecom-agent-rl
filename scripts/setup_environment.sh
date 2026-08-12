@@ -51,6 +51,17 @@ fi
 cd "${SHOP_ENV_ROOT}"
 PYTHONPATH=. "${ENV_DIR}/bin/python" scripts/build_index.py
 
+# 环境代码的内容锚。商品数据上面已经校过，但**计算 reward 的代码**同样会改结果，
+# 而 third_party/ 不入 git，改了没有任何痕迹。首次落锚，之后每次 setup 都校验。
+# 只用标准库，所以不依赖项目 venv 是否已建好。
+cd "${ROOT}"
+if [[ -f "${ROOT}/data/environment/manifest.json" ]]; then
+  python3 scripts/hash_environment.py
+else
+  echo "首次落锚环境代码内容哈希："
+  python3 scripts/hash_environment.py --write
+fi
+
 echo "ShopSimulator is ready."
 echo "  product SHA-256: ${actual_sha256}"
 echo "  index: ${SHOP_ENV_ROOT}/search_engine/products.sqlite3"

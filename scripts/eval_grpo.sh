@@ -68,6 +68,15 @@ rollout() {  # rollout <端口> <输出> <说明>
 
 log "###### GRPO 评测开始（k=${ATTEMPTS}，目标每模型 ${TARGET} 条）"
 
+# 环境代码的内容锚。这一条是**硬闸门**，和下面的 slot 体检不同：slot 泄漏可以回收后重跑，
+# 而环境代码变了意味着这批数字和 baseline / SFT 的那两批不在同一个口径上——继续跑只会
+# 产出一份看起来正常、实际不可比的报告。
+if ! python3 scripts/hash_environment.py >> "$LOG" 2>&1; then
+  python3 scripts/hash_environment.py >&2
+  log "!! 环境代码与锚不一致，评测中止（与 baseline/SFT 不同口径，跑了也不能比）"
+  exit 1
+fi
+
 # 先量一次容量：slot 泄漏会表现成「并发没超也报 env_error」，事后才发现要重跑。
 .venv/bin/python scripts/check_environment.py >> "$LOG" 2>&1 \
   || log "!! 环境池有泄漏，先跑 check_environment.py --reclaim 再来"
