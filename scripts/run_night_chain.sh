@@ -28,6 +28,9 @@ log "###### 夜间链启动"
 
 # --- E2：等 E1 让出 GPU 1-2，且等 S4 两个 run 都出了权重 -----------------------
 wait_gone "eval_checkpoints.sh" "E1"
+# E1 判出并列后触发了预注册的 k=8 补采，它占着 GPU1 和端口段 5700——E2 两样都要，
+# 同端口段并行两个客户端池会互抢租约 → env_error → 整批中止。所以必须等它退出。
+wait_gone "topup_k8.sh" "E1 的 k=8 补采"
 wait_gone "run_s4.sh" "S4"
 
 missing=0
