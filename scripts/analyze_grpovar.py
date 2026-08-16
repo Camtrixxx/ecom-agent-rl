@@ -57,7 +57,13 @@ RUNS = [
 SFT_LEG = "gv_sft"           # 只服务附带产出 2，缺了不挡主判定
 PUB_S = 0.0137               # R1 的 s = 1.37 pp
 PUB_MEAN = 0.0817            # R1 的 d̄ = +8.17 pp
-NOISE_FLOOR = 0.0039         # #14 的窗口内锚：同一份权重重评三次的 s = 0.39 pp
+# #14 的窗口内锚：同一份权重重评三次的 s = 0.39 pp。
+# **08-16 07:55 事后发现这个锚偏小，附带产出 1 因此是个假数。** 本臂四条腿的 bootstrap
+# 半宽（1.99/1.93/1.95/1.83 pp）反解出 σ_m ≈ 0.70 pp，是它的 1.8 倍；0.39 pp 自己的 df
+# 只有 2，拿它当确定的常数去做减法从一开始就不该。
+# 常数**不改**——它是预注册的一部分，事后改算式就等于事后挑口径。改的是打印：
+# 下面在附带 1 里加了一句作废声明，见 _ancillary()。
+NOISE_FLOOR = 0.0039
 F_CRIT_2_2 = 19.0            # F₀.₉₅(2,2)，单侧
 
 
@@ -252,6 +258,44 @@ def _ancillary(new: list[dict], s_new: float, m_new: float) -> None:
     else:
         print(f"  → **{math.sqrt(var) * 100:.2f} pp**（点估计，n=3，别当区间用）")
 
+    # 事后作废声明。预注册的算式照跑照登，但不能让这个数被人引用。
+    hw = _bootstrap_halfwidths(new)
+    if hw:
+        sigma_m = statistics.mean(hw) / 1.96 / math.sqrt(2)
+        print()
+        print("  !! 上面这个数作废（08-16 07:55 事后更正，算式是预注册的，故保留照算）")
+        print(f"     三个配对 delta 的 bootstrap 半宽 {[f'{x * 100:.2f}' for x in hw]} pp 互相一致")
+        print("     （roadmap 那张表还有第四个 1.83 pp，来自 gv_sft−dw_sft 的同权重配对，")
+        print("      四个一起算 σ_m = 0.70 pp，差别在小数第二位）")
+        print(f"     由 σ_m = 半宽/1.96/√2 反解 → **单次评测噪声 σ_m ≈ {sigma_m * 100:.2f} pp**，")
+        print(f"     是减数 0.39 pp 的 {0.0039 and sigma_m / 0.0039:.1f} 倍。用它重算：")
+        if s_new <= sigma_m:
+            print(f"     s′ = {s_new * 100:.2f} pp ≤ σ_m → **纯训练方差测不出**（不是 0：")
+            print("     零训练方差时 s′ 的期望值本来就等于 σ_m）。")
+        else:
+            print(f"     sqrt(s′² − σ_m²) = {math.sqrt(s_new ** 2 - sigma_m ** 2) * 100:.2f} pp")
+        print("     方向上这只会让主判定更稳。详见 docs/roadmap.md「尺子变细之后」。")
+
+
+def _bootstrap_halfwidths(new: list[dict]) -> list[float]:
+    """三个**配对 delta** 的 bootstrap 半宽——用来反解单次评测的采样噪声 σ_m。
+
+    必须用配对区间，不能用绝对成功率的区间。绝对成功率的半宽是 3.7 pp，
+    因为它含**题目难度的异质性**（500 题本身有的易有的难）；而这一项对三条腿是同一批题、
+    完全共用，在 s′ 里整块约掉。配对区间已经把它差掉了，剩下的才是每条腿各自的采样噪声。
+    我第一版就是拿绝对区间算的，得出 σ_m = 1.34 pp，虚高一倍。
+
+    每个配对差含两份独立噪声（处理侧 + 基线侧）→ SE(δ) = √2 σ_m，
+    故 σ_m = 半宽 / 1.96 / √2。
+    """
+    out = []
+    for r in new:
+        p = OUTDIR / f"{r['leg']}_vs_sft.report.json"
+        if not p.exists():
+            continue
+        d = json.loads(p.read_text())["paired_vs_baseline"]
+        out.append((d["ci_high"] - d["ci_low"]) / 2)
+    return out
 
     # ---- 附带 2：第一次完全同窗口的 GRPO 增益 ----
     print()
