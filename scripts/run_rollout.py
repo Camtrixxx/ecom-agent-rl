@@ -115,6 +115,20 @@ def main() -> None:
     if not args.pool.exists():
         raise SystemExit(f"任务池不存在: {args.pool}\n先跑 python scripts/build_task_pools.py")
 
+    # 解析口径必须在日志第一屏就说清楚，因为它会改成功率：宽容口径把一部分
+    # no_tool_call 变成正常步骤或 truncated，两侧的数不能直接比。轨迹记录里也有
+    # `tolerant_parse` 标记（见 agent.Trajectory），这里再打一遍是为了让**看日志的人**
+    # 不必去 grep jsonl 才知道这批数据是哪个口径。
+    from ecom_agent_rl.rollout.agent import TOLERANT_PARSE
+
+    if TOLERANT_PARSE:
+        logging.warning(
+            "宽容重解析已开启（ROLLOUT_TOLERANT_PARSE）：这批轨迹与 08-15 之前"
+            "已发布的严格口径数字**不可直接比较**"
+        )
+    else:
+        logging.info("解析口径：严格（与已发布数字一致）")
+
     task_ids = load_task_ids(args.pool)
     if args.limit is not None:
         task_ids = task_ids[: args.limit]
