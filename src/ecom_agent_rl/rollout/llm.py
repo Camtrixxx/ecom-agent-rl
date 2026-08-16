@@ -284,7 +284,19 @@ class ChatClient:
                 continue
             for sink in sinks:
                 sink.add(body.get("usage"))
-            return dict(message)
+            out = dict(message)
+            # finish_reason 在 choices 层而不是 message 层，所以要显式带出来。
+            #
+            # 为什么传输层要管这个：`agent.Status.TRUNCATED` 需要区分「模型选择只说话」
+            # 和「输出被 max_tokens 腰斩」，而这两者在 message 里长得一模一样——都是有
+            # content、没有 tool_calls。唯一能分开它们的字段就在这里，不带出来上层就
+            # 永远只能猜。带出来仍然只是转述服务端说的话，判断留在 agent.py。
+            #
+            # 这个键不会流进 trajectory.messages：agent.py 构造 assistant_message 时是
+            # 白名单取字段（role / content / tool_calls / reasoning_content），不是整个
+            # dict 透传。所以它不会进训练样本，也不会被回传给服务端。
+            out["finish_reason"] = (body["choices"][0] or {}).get("finish_reason")
+            return out
         raise LLMError(f"{url}: unreachable, last={last}")
 
 
