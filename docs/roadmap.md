@@ -18,6 +18,10 @@
 后续 scaling 对照可用同系列 Qwen2.5-14B/32B-Instruct，tokenizer 与 chat
 template 一致，适配层无需改动。
 
+**跑任何对照臂之前先过一遍 [preregistration-checklist.md](preregistration-checklist.md)。**
+九条，每条都来自本项目某条臂上踩过的一次。各臂自己的判读规则封在
+`docs/*-preregistration.md`，一律写在数据之前。
+
 ## 实施顺序
 
 原则：先有可信评测和足量数据，再训练。否则训练结果无法解读。
