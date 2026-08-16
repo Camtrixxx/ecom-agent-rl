@@ -536,3 +536,41 @@ None（seed 44 还没写 metadata.json 时就会触发），打印时 `format(No
 若不干跑，这个错要等到 21:00 数据齐了才炸。改成 `meta_seed` 之后顺带多了一道校验。
 还改了一处措辞：轮数读不到时原本印「None/40 未跑满」——那是把「我们不知道」说成
 「这个 run 没跑满」，现在两种情况分开报。
+
+## 20:35 — 补上 D1 轨迹文件的血缘
+
+等 seed 43 评测的空档做的，不占 GPU，也不对 D2 承诺任何事。
+
+盘上有一处血缘缺口：`data/task_pools/sft_train_retry.metadata.json`（任务池）血缘完整，
+`outputs/teacher/sft_train_retry.summary.json` 也有环境锚，但那个 153 MB 的轨迹文件
+本身没有任何机器可读的来源记录。原因是采集器每次调用都覆盖 summary，而 D1 是「跑到满
+为止」的循环加一次中途手术，所以最后剩下的 summary 只描述最后一次补采（`planned: 67,
+skipped: 1152`）——看起来像是这个文件只有 67 条。narrative 记在本日志里，但日志不是
+机器可读的，D2 真要用这批数据时第一个问题就是「这文件是什么、动过没有」。
+
+新增 `scripts/write_retry_lineage.py` → `outputs/teacher/sft_train_retry.metadata.json`
+（schema `ecom-retry-trajectories-v1`）：文件自身 sha256、记录数、reward_type 与 status
+分布、accepted 数，加上把 1219 → 1152 → 1219 那次手术写成 `history` 三步。
+
+两个决定：
+
+- **`accepted` 的判据从 `ecom_agent_rl.data.sft` import `SUCCESS_TYPES`，不在脚本里抄。**
+  抄一份就会有「metadata 说 408 条可用、SFT 构建器只收 403 条」这类查起来很费劲的偏差，
+  而这种偏差恰好会在半年后没人记得的时候咬人。
+- **只描述盘上已有的东西，不表示采用。** 是否用它训 SFT-v2、要不要动 `SUCCESS_TYPES`，
+  都是另外的决策。血缘文件不该夹带立场。
+
+数出来有三个值得看的：
+
+- **1219 条记录 / 1219 个去重 task_id / 0 重复。** 这是对那次手术的事后验证：删 67 行
+  再让 resume 补回，没有留下重复记录，每个任务恰好一条。这一点当时没验，现在验了。
+- accepted 408 = 33.5%（gold_purchase 406 + valid_alternative_purchase 2），与日志里
+  403 → 408 的叙述一致。
+- 134 条没有 reward_type，正好等于 no_tool_call 110 + empty_response 24。
+
+顺带纠一个数：我原先在 notes 里按记忆写 `partial_alternative_purchase` 162 条，
+从文件数出来是 166。血缘文件里的数字不能凭记忆写，改成从统计结果取。这批难题上
+valid_alternative_purchase 只有 2 条而 partial 有 166 条——「买替代品」几乎从不完整成功，
+但改 `SUCCESS_TYPES` 就是改 SFT 的数据分布，不在本轮范围内。
+
+`.before_topup.bak`（152 MB）确认还在盘上，metadata 里那句引用不是悬空的。
