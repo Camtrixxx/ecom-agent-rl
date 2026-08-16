@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # 7B 全参 GRPO，FSDP2。底座与 train_sft.sh 相同，差别只在卡的分配。
 #
-# 卡的分配：vLLM 独占 GPU_VLLM（默认 1），训练用 GPUS（默认 3-7）。两者必须不相交
-# ——vLLM 按 gpu_memory_utilization 抢一大块显存并一直持有，和 FSDP 同卡必 OOM。
+# 卡的分配：vLLM 独占 GPU_VLLM（默认 1），训练用 GPUS（默认 2-7，共 6 张）。两者必须
+# 不相交——vLLM 按 gpu_memory_utilization 抢一大块显存并一直持有，和 FSDP 同卡必 OOM。
 # GPU 0 上有别人的常驻服务，两边都不碰。
+#
+# **改 GPUS 的卡数不是无害的调度动作**：optimizer 的 global batch 是 grad_accum × 卡数，
+# 6 卡是 12 批、4 卡是 8 批。已发布的 seed 42 用的就是这里的默认 6 卡，所以任何要和它
+# 比较的 run（例如 R1 的 seed 43/44）都必须留着默认值——否则卡数就和被研究的变量混在
+# 一起，而那恰好是那个实验唯一要量的东西。宁可让空闲卡闲着。
 #
 # 训练进程自己管 vLLM 的生死（每轮换权重要重启），所以**跑这个脚本前不要手动起
 # vLLM**：端口被占的话 serve_model.sh 会直接退出，训练在第一轮就失败。
