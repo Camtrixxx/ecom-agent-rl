@@ -69,6 +69,13 @@ stop_server() {
 
 done_count() { wc -l < "$1" 2>/dev/null || echo 0; }
 
+# 判「模型能不能评」要看权重落没落盘，不能看目录在不在。train_sft.py 一开跑就先建
+# out-dir 写 train_log.jsonl（train_sft.py:292），权重要到最后 save() 才出现；GRPO 同理。
+# 这个脚本自己踩过：08-13 06:30 我趁 GPU 空闲提前起了它去评三份已就绪的权重，而
+# sft_e2 还在训——目录已存在，守卫放行，vLLM 去加载一个没有权重的目录，卡满 900 s
+# 超时才退，白烧 43 分钟 GPU，最后 sft_e2 还是得串行评。预热那一路尤其要防，它是静默的。
+has_weights() { [[ -f "$1/model.safetensors" || -f "$1/model.safetensors.index.json" ]]; }
+
 rollout() {
   local port="$1" out="$2" name="$3"
   for attempt in 1 2 3; do
@@ -96,7 +103,7 @@ trap cleanup EXIT
 for i in "${!MODELS[@]}"; do
   entry="${MODELS[$i]}"; name="${entry%%:*}"; path="${entry#*:}"
   out="${OUTDIR}/${name}.jsonl"
-  if [[ ! -d "$path" ]]; then log "!! ${name}: 目录不存在 ${path}，跳过"; continue; fi
+  if ! has_weights "$path"; then log "!! ${name}: 权重不存在 ${path}，跳过"; continue; fi
   if (( $(done_count "$out") >= TARGET )); then log "=== ${name}: 已完成，跳过"; continue; fi
 
   if [[ -z "$cur_pid" ]]; then
@@ -111,7 +118,7 @@ for i in "${!MODELS[@]}"; do
 
   if (( i + 1 < ${#MODELS[@]} )); then
     nentry="${MODELS[$((i + 1))]}"; nname="${nentry%%:*}"; npath="${nentry#*:}"
-    if [[ -d "$npath" ]] && (( $(done_count "${OUTDIR}/${nname}.jsonl") < TARGET )); then
+    if has_weights "$npath" && (( $(done_count "${OUTDIR}/${nname}.jsonl") < TARGET )); then
       if [[ "$cur_gpu" == "$GPU_A" ]]; then next_gpu="$GPU_B"; next_port="$PORT_B";
       else next_gpu="$GPU_A"; next_port="$PORT_A"; fi
       next_pid=$(serve "$npath" "$next_port" "$next_gpu" "outputs/logs/vllm_var_${nname}.log")

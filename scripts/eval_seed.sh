@@ -29,7 +29,13 @@ mkdir -p outputs/rollouts outputs/logs
 
 log() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG"; }
 
-[[ -d "$MODEL" ]] || { log "!! 模型目录不存在：${MODEL}"; exit 1; }
+# 判「模型能不能评」要看权重落没落盘，不能看目录在不在。train_sft.py 一开跑就先建
+# out-dir 写 train_log.jsonl（train_sft.py:292），权重要到最后 save() 才出现；GRPO 同理。
+# 拿目录当守卫，就会在训练中途放行，vLLM 去加载一个没有权重的目录，卡满 900 s 超时——
+# 这不是假想：08-13 06:30 就这么白烧了 43 分钟 GPU。
+has_weights() { [[ -f "$1/model.safetensors" || -f "$1/model.safetensors.index.json" ]]; }
+
+has_weights "$MODEL" || { log "!! 模型权重不存在（目录可能只是训练中途建的）：${MODEL}"; exit 1; }
 
 # 硬闸门：环境代码变了就和 baseline/SFT/seed42 不在同一口径，跑了也不能比。
 if ! python3 scripts/hash_environment.py >> "$LOG" 2>&1; then
