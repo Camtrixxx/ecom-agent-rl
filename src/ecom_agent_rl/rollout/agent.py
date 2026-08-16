@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Mapping
@@ -31,8 +32,21 @@ from ..environment import tools
 from ..environment.pool import EnvironmentPool, EnvironmentServiceError
 from .llm import ChatClient, ContextOverflowError, EmptyResponseError, LLMError, Usage
 from .prompt import SYSTEM_PROMPT
+from .tool_call_recovery import recover_tool_calls
 
 logger = logging.getLogger(__name__)
+
+_TRUE = frozenset({"1", "true", "yes", "on"})
+# 宽容重解析 + 截断单独记账**是改口径的**：它把一部分 no_tool_call 变成正常步骤或
+# TRUNCATED，于是同一份权重在开关两侧的成功率不能直接比。所以默认关。
+#
+# 为什么做成开关而不是直接改：08-15 之前发布的全部数字（baseline / sft / grpo v1 / v2 /
+# 各 seed / 各快照）都是在严格口径下采的。直接改会让「新采的数」和「已发布的数」不可比，
+# 而不可比是**静默**的——两边都是一个成功率，看不出差别在哪。开关让旧口径仍然可复现。
+#
+# 打开时每条轨迹记录里会多出 `tolerant_parse: true`，所以任何一个 jsonl 都能自己说清
+# 它是哪个口径采的，不必去翻当时的环境变量。
+TOLERANT_PARSE = os.environ.get("ROLLOUT_TOLERANT_PARSE", "").strip().lower() in _TRUE
 
 # 环境侧 SHOP_MAX_STEPS 默认 35，两边必须一致，否则评测的地平线和训练不同。
 DEFAULT_MAX_STEPS = 35
@@ -48,6 +62,7 @@ class Status:
     DONE = "done"                       # 环境判定回合结束（买了 / 主动结束 / 触顶）
     MAX_STEPS = "max_steps"             # 用完步数预算
     NO_TOOL_CALL = "no_tool_call"       # 模型只说话不调工具（有正文，没动手）
+    TRUNCATED = "truncated"             # 回复被 max_tokens 截断，没能给出可执行的调用
     EMPTY_RESPONSE = "empty_response"   # 服务端反复返回空消息（无正文也无工具调用）
     REJECTION_LIMIT = "rejection_limit"  # 被守卫拒绝太多次
     CONTEXT_OVERFLOW = "context_overflow"  # prompt 超出模型上下文窗口
@@ -100,6 +115,12 @@ class Trajectory:
     # 生效了，但说明不了是哪些回合被压缩过——`repeat_loop` 的回合明显更长、也几乎都
     # 被压缩过，要判断压缩是不是在制造它就必须能按回合对照（roadmap 阶段 D 末尾）。
     usage: dict[str, int] = field(default_factory=dict)
+    # 这条轨迹是在哪个解析口径下采的，以及宽容口径下各救回/判截断了几次。
+    # 默认 False 时**不写进记录**：让默认路径产出的 jsonl 与 08-15 之前逐字节同构，
+    # 免得同一个文件里前后半段的字段集不一样（评测中途重试会重新导入本模块）。
+    tolerant_parse: bool = False
+    recovered_tool_calls: int = 0
+    truncated_replies: int = 0
 
     @property
     def env_steps(self) -> int:
@@ -110,7 +131,7 @@ class Trajectory:
         return self.status in INFRA_FAILURES
 
     def as_record(self) -> dict[str, Any]:
-        return {
+        record: dict[str, Any] = {
             "trajectory_id": self.trajectory_id,
             "task_id": self.task_id,
             "attempt": self.attempt,
@@ -128,6 +149,12 @@ class Trajectory:
             "usage": self.usage,
             "error": self.error,
         }
+        # 只在非默认口径下才加这三个键。见 `tolerant_parse` 字段上的说明。
+        if self.tolerant_parse:
+            record["tolerant_parse"] = True
+            record["recovered_tool_calls"] = self.recovered_tool_calls
+            record["truncated_replies"] = self.truncated_replies
+        return record
 
 
 def _tool_call_fields(call: Mapping[str, Any]) -> tuple[str, dict[str, Any], str]:
@@ -160,9 +187,16 @@ def run_episode(
     max_consecutive_rejections: int = DEFAULT_MAX_CONSECUTIVE_REJECTIONS,
     max_rejections: int = DEFAULT_MAX_REJECTIONS,
     system_prompt: str = SYSTEM_PROMPT,
+    tolerant_parse: bool | None = None,
 ) -> Trajectory:
-    """跑一个回合。任何异常都收进 `Trajectory.status`，不向外抛。"""
-    trajectory = Trajectory(task_id=task_id, attempt=attempt)
+    """跑一个回合。任何异常都收进 `Trajectory.status`，不向外抛。
+
+    `tolerant_parse` 给 None 就取模块级的 `TOLERANT_PARSE`（来自环境变量
+    `ROLLOUT_TOLERANT_PARSE`，默认关）。做成参数而不是只读环境变量，是为了让测试能
+    直接把两个口径都跑一遍，而不必去改进程环境再重新导入模块。
+    """
+    tolerant = TOLERANT_PARSE if tolerant_parse is None else bool(tolerant_parse)
+    trajectory = Trajectory(task_id=task_id, attempt=attempt, tolerant_parse=tolerant)
     episode_usage = Usage()
     try:
         with pool.episode(task_id) as episode:
@@ -174,6 +208,7 @@ def run_episode(
                 max_consecutive_rejections=max_consecutive_rejections,
                 max_rejections=max_rejections,
                 system_prompt=system_prompt,
+                tolerant=tolerant,
                 usage=episode_usage,
             )
     except EnvironmentServiceError as exc:
@@ -210,6 +245,7 @@ def _drive(
     max_consecutive_rejections: int,
     max_rejections: int,
     system_prompt: str,
+    tolerant: bool,
     usage: Usage | None = None,
 ) -> None:
     reset_allowed, reset_blocked = obs.split_env_payload(episode.reset_result)
@@ -230,11 +266,31 @@ def _drive(
         assistant = client.complete(trajectory.messages, tools.TOOL_SCHEMAS, usage=usage)
         calls = list(assistant.get("tool_calls") or [])
 
+        # vLLM 的 hermes 解析器是全有或全无（源码 hermes_tool_parser.py:87-120）：正文里
+        # 首块合法、尾部有垃圾（复读，或被 1024 token 上限腰斩），整条回复就一个
+        # tool_call 都不返回。08-14 实测 grpo_v2 的 256 条标签轨迹里 206 条（80.5%）
+        # 首块是合法的，也就是说这些回合里模型其实动了手，只是记账把它记成了没动。
+        #
+        # 兜底放在这一层而不是 llm.py：llm.py 是传输层，它如实转述服务端给的字段，那没
+        # 有错；错的是**这里**把「没有 tool_calls」直接等同于「模型选择不动手」。
+        if tolerant and not calls:
+            recovered = recover_tool_calls(assistant.get("content"), tools.TOOL_NAMES)
+            if recovered:
+                calls = recovered
+                trajectory.recovered_tool_calls += 1
+
         if not calls:
             trajectory.messages.append(
                 {"role": "assistant", "content": assistant.get("content") or ""}
             )
-            trajectory.status = Status.NO_TOOL_CALL
+            # 「被截断」和「只说话不动手」是两件事：前者是我们把 max_tokens 定在 1024
+            # 造成的，后者是模型的决策。挤在同一个 no_tool_call 里就永远分不开，而
+            # no_tool_call 恰好是 D2 里判 v2 输掉 6.29 pp 的那个指标。
+            if tolerant and assistant.get("finish_reason") == "length":
+                trajectory.truncated_replies += 1
+                trajectory.status = Status.TRUNCATED
+            else:
+                trajectory.status = Status.NO_TOOL_CALL
             return
 
         # 每轮只执行第一个工具调用：后面的调用是基于同一个旧 observation 生成的，

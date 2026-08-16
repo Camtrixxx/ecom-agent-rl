@@ -487,3 +487,127 @@ def test_an_absent_reasoning_content_is_not_invented():
     )
     assistant = [m for m in trajectory.messages if m["role"] == "assistant"]
     assert "reasoning_content" not in assistant[0]
+
+
+# ---------------------------------------------------------------------------
+# 宽容重解析与截断记账（默认关，由 tolerant_parse 显式打开）
+#
+# 背景：vLLM 的 hermes 解析器是全有或全无。正文里首块合法、尾部有垃圾，整条回复就一个
+# tool_call 都不返回，于是回合被记成 no_tool_call——而 08-14 实测 grpo_v2 的 256 条标签
+# 轨迹里 206 条（80.5%）首块其实是合法的。
+#
+# 这组测试里**只有一条**是证明兜底能救回来的（test_a_tagged_call_...）。其余全部朝相反
+# 方向把关：不许救过头。理由是代价不对称——救不回来只是少算一条，凭空造出一个模型没发过
+# 的调用，会把假动作写进 SFT 训练样本，而那种错误在下游是查不出来的。
+# ---------------------------------------------------------------------------
+
+TAGGED = '<tool_call>\n{"name": "search_products", "arguments": {"query": "狗狗衣服"}}\n</tool_call>'
+
+
+def test_a_tagged_call_in_the_content_is_recovered_and_the_episode_continues():
+    """首块合法、尾部被腰斩：模型其实动了手，不该记成「选择不动手」。"""
+    trajectory, _, episode = run(
+        [{"content": TAGGED + '\n<tool_call>\n{"name": "open_prod'}],
+        [step_payload(search_state(), done=True, reward=1.0)],
+        tolerant_parse=True,
+    )
+    assert trajectory.status == Status.DONE
+    assert episode.actions, "救回来的调用没有真的发给环境"
+    assert trajectory.recovered_tool_calls == 1
+
+
+def test_the_same_reply_is_no_tool_call_when_the_switch_is_off():
+    """默认口径必须与 08-15 之前逐字一致，否则新旧数字不可比。"""
+    trajectory, _, episode = run(
+        [{"content": TAGGED}],
+        [],
+    )
+    assert trajectory.status == Status.NO_TOOL_CALL
+    assert not episode.actions
+    assert "tolerant_parse" not in trajectory.as_record()
+
+
+def test_the_recovered_call_is_auditable_in_the_record():
+    """救回来的调用要能在事后认出来，否则没法回答「这个数里有多少是兜底救的」。"""
+    trajectory, _, _ = run(
+        [{"content": TAGGED}],
+        [step_payload(search_state(), done=True, reward=1.0)],
+        tolerant_parse=True,
+    )
+    record = trajectory.as_record()
+    assert record["tolerant_parse"] is True
+    assert record["recovered_tool_calls"] == 1
+    assistant = [m for m in trajectory.messages if m["role"] == "assistant"]
+    assert assistant[0]["tool_calls"][0]["id"].startswith("recovered-")
+
+
+def test_prose_that_merely_mentions_a_tool_is_not_recovered():
+    """没有标签就没有调用。这是不许救过头的主防线。"""
+    trajectory, _, episode = run(
+        [{"content": "我觉得应该 search_products({'query': '狗狗衣服'}) 一下"}],
+        [],
+        tolerant_parse=True,
+    )
+    assert trajectory.status == Status.NO_TOOL_CALL
+    assert not episode.actions
+    assert trajectory.recovered_tool_calls == 0
+
+
+def test_a_tag_naming_an_unknown_tool_is_not_recovered():
+    """名字不在 TOOL_SCHEMAS 里就不能执行——救回一个不存在的工具比不救更糟。"""
+    trajectory, _, episode = run(
+        [{"content": '<tool_call>{"name": "buy_everything", "arguments": {}}</tool_call>'}],
+        [],
+        tolerant_parse=True,
+    )
+    assert trajectory.status == Status.NO_TOOL_CALL
+    assert not episode.actions
+
+
+def test_a_truncated_reply_is_not_recorded_as_a_choice_not_to_act():
+    """finish_reason=length 是我们把 max_tokens 定在 1024 造成的，不是模型的决策。
+
+    混进 no_tool_call 就永远分不开——而 no_tool_call 正是 D2 里判 v2 输掉 6.29 pp 的
+    那个指标。
+    """
+    trajectory, _, _ = run(
+        [{"content": "我先看看这几件衣服哪个" * 40, "finish_reason": "length"}],
+        [],
+        tolerant_parse=True,
+    )
+    assert trajectory.status == Status.TRUNCATED
+    assert trajectory.as_record()["truncated_replies"] == 1
+
+
+def test_a_reply_that_really_only_talks_stays_no_tool_call():
+    """截断这一类不能把「真的只说话」也吞进去，否则等于换个名字掩盖同一个问题。"""
+    trajectory, _, _ = run(
+        [{"content": "我觉得这些都不合适，就不买了。", "finish_reason": "stop"}],
+        [],
+        tolerant_parse=True,
+    )
+    assert trajectory.status == Status.NO_TOOL_CALL
+
+
+def test_recovery_wins_over_truncation_when_the_first_block_is_valid():
+    """被腰斩但首块合法：这是实测里最常见的一种，必须继续跑而不是记成截断。"""
+    trajectory, _, episode = run(
+        [{"content": TAGGED + '\n<tool_call>\n{"name": "op', "finish_reason": "length"}],
+        [step_payload(search_state(), done=True, reward=1.0)],
+        tolerant_parse=True,
+    )
+    assert trajectory.status == Status.DONE
+    assert trajectory.recovered_tool_calls == 1
+    assert trajectory.truncated_replies == 0
+    assert episode.actions
+
+
+def test_truncation_is_not_an_infrastructure_failure():
+    """它是这道题的一个结局，和 MAX_STEPS 同类。放进 INFRA_FAILURES 会掐掉整批采集。"""
+    trajectory, _, _ = run(
+        [{"content": "x" * 100, "finish_reason": "length"}],
+        [],
+        tolerant_parse=True,
+    )
+    assert trajectory.status == Status.TRUNCATED
+    assert not trajectory.infra_failure
